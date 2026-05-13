@@ -1,0 +1,670 @@
+"""MCP Streamable HTTP endpoint — exposes Mimir tools over JSON-RPC 2.0.
+
+Mounted at /mcp (no /api prefix) so Cursor can connect with:
+  URL:    http://<host>:8787/mcp
+  Header: Authorization: Bearer <MIMIR_API_KEY>
+
+MCP Streamable HTTP transport (2025-03-26 spec):
+  POST /mcp  — client→server messages, responds with text/event-stream SSE
+  GET  /mcp  — server→client SSE channel (keepalive; we don't push server events)
+  DELETE /mcp — session cleanup (stateless: always 200)
+  OPTIONS /mcp — handled by CORSMiddleware
+
+Auth: Authorization: Bearer <key> or X-API-Key: <key>.
+No local mcp/ package import — implements the protocol directly to avoid the
+naming conflict with the installed mcp SDK.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from typing import Any, AsyncIterator
+
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+
+from mimir.config import get_settings
+from storage.database import get_session_factory
+
+router = APIRouter(tags=["mcp"])
+
+# Protocol version this server advertises
+_MCP_VERSION = "2024-11-05"
+
+# ── Tool registry ─────────────────────────────────────────────────────────────
+
+_TOOLS = [
+    {
+        "name": "memory.remember",
+        "description": "Store an event or fact in Mimir memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "description": "Memory type (fact, event, outcome, …)"},
+                "content": {"type": "string", "description": "Memory content"},
+                "project": {"type": "string"},
+                "session_id": {"type": "string"},
+            },
+            "required": ["type", "content"],
+        },
+    },
+    {
+        "name": "memory.recall",
+        "description": "Retrieve relevant memories for a query.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "project": {"type": "string"},
+                "session_id": {"type": "string"},
+                "limit": {"type": "integer"},
+                "token_budget": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "memory.search",
+        "description": "Semantic search across all memory layers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "layer": {"type": "string"},
+                "project": {"type": "string"},
+                "min_score": {"type": "number"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "memory.record_outcome",
+        "description": "Record the outcome of a task.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "result": {"type": "string"},
+                "lesson": {"type": "string"},
+                "project": {"type": "string"},
+                "session_id": {"type": "string"},
+            },
+            "required": ["content", "result"],
+        },
+    },
+    {
+        "name": "skill.list",
+        "description": "List available skills.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "status": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "approval.request",
+        "description": "Create an approval request for an improvement.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "improvement_id": {"type": "string"},
+            },
+            "required": ["improvement_id"],
+        },
+    },
+    {
+        "name": "approval.status",
+        "description": "List pending and recent approvals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "Filter: pending, approved, rejected, all"},
+            },
+        },
+    },
+    {
+        "name": "reflection.log",
+        "description": "Log a reflection with observations and lessons.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "observations": {"type": "array", "items": {"type": "string"}},
+                "lessons": {"type": "array", "items": {"type": "string"}},
+                "project": {"type": "string"},
+            },
+            "required": ["observations", "lessons"],
+        },
+    },
+    {
+        "name": "improvement.propose",
+        "description": "Propose a system improvement.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "improvement_type": {"type": "string"},
+                "title": {"type": "string"},
+                "reason": {"type": "string"},
+                "current_behavior": {"type": "string"},
+                "proposed_behavior": {"type": "string"},
+                "expected_benefit": {"type": "string"},
+                "project": {"type": "string"},
+            },
+            "required": [
+                "improvement_type", "title", "reason",
+                "current_behavior", "proposed_behavior", "expected_benefit",
+            ],
+        },
+    },
+]
+
+_TOOL_NAMES = {t["name"] for t in _TOOLS}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def _www_authenticate_header(request: Request | None = None) -> str:
+    """Build WWW-Authenticate header pointing to OAuth discovery metadata."""
+    settings = get_settings()
+    base = settings.public_url.rstrip("/") if settings.public_url else ""
+    if not base and request:
+        base = f"{request.url.scheme}://{request.url.netloc}"
+    if base:
+        return f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"'
+    return "Bearer"
+
+
+async def _resolve_api_key(authorization: str, x_api_key: str, request: Request | None = None) -> str:
+    """Extract and validate the API key or OAuth token; return key for downstream use.
+
+    Accepts Authorization: Bearer <key|oauth_token> or X-API-Key: <key>.
+    In dev-auth mode all requests are accepted (returns configured key).
+    Returns the raw key string (used for user context resolution in _call_tool).
+    """
+    settings = get_settings()
+
+    key = ""
+    if authorization.startswith("Bearer "):
+        key = authorization[7:].strip()
+    if not key:
+        key = x_api_key.strip()
+
+    # Dev mode: skip auth unless an explicit Bearer token was provided
+    if settings.is_dev_auth and not key:
+        return settings.api_key or ""
+
+    if not key:
+        www_auth = _www_authenticate_header(request)
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization: Bearer <key> required",
+            headers={"WWW-Authenticate": www_auth},
+        )
+
+    # Try OAuth access token first (always validated, even in dev mode)
+    from api.routes.oauth import resolve_oauth_token, is_revoked_oauth_token
+    oauth_uid = await resolve_oauth_token(key)
+    if oauth_uid:
+        return key
+
+    # If the token was an OAuth token but is revoked/expired → 401 (don't fall through to API key)
+    if await is_revoked_oauth_token(key):
+        raise HTTPException(
+            status_code=401,
+            detail="Token has been revoked or expired",
+            headers={"WWW-Authenticate": _www_authenticate_header(request)},
+        )
+
+    # Dev mode with explicit non-OAuth key: accept anything (for dev/test convenience)
+    if settings.is_dev_auth:
+        return key
+
+    # multi_user mode: reject the default dev key (local-dev-key)
+    if settings.is_multi_user and key == settings.dev_api_key and settings.dev_api_key in ("local-dev-key",):
+        raise HTTPException(
+            status_code=401,
+            detail="Dev key not accepted in multi_user mode",
+            headers={"WWW-Authenticate": _www_authenticate_header(request)},
+        )
+
+    # Fast path: matches configured MIMIR_API_KEY
+    if key == settings.api_key:
+        return key
+
+    # DB-backed API key lookup
+    from storage.models import APIKey
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    factory = get_session_factory()
+    async with factory() as session:
+        key_hash = hashlib.sha256(key.encode()).hexdigest()
+        result = await session.execute(
+            select(APIKey)
+            .where(APIKey.key_hash == key_hash, APIKey.is_active == True)  # noqa: E712
+            .options(selectinload(APIKey.user))
+        )
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": _www_authenticate_header(request)},
+            )
+        if not row.user.is_active:
+            raise HTTPException(status_code=403, detail="User account is inactive")
+
+    return key
+
+
+# ── Tool dispatch ─────────────────────────────────────────────────────────────
+
+async def _call_tool(name: str, args: dict, api_key: str) -> Any:
+    """Execute a tool by calling the Mimir service layer directly."""
+    from sqlalchemy import select
+    from api.deps import UserContext, DEV_USER_ID
+
+    settings = get_settings()
+    factory = get_session_factory()
+
+    # Try OAuth token first (takes priority even in dev mode)
+    from api.routes.oauth import resolve_oauth_token
+    from storage.models import User as UserModel
+
+    oauth_uid = await resolve_oauth_token(api_key)
+    if oauth_uid:
+        async with factory() as _s:
+            u = await _s.get(UserModel, oauth_uid)
+        if u:
+            user = UserContext(id=u.id, email=u.email, display_name=u.display_name, is_dev=False)
+        else:
+            raise ValueError("OAuth token user not found")
+    elif settings.is_dev_auth:
+        user = UserContext(id=DEV_USER_ID, email="dev@local", display_name="Dev User", is_dev=True)
+    elif api_key == settings.api_key and not settings.is_multi_user:
+        user = UserContext(id="admin", email="admin@local", display_name="Admin", is_dev=False)
+    else:
+        from storage.models import APIKey
+        from sqlalchemy.orm import selectinload
+
+        async with factory() as session:
+            key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+            r = await session.execute(
+                select(APIKey)
+                .where(APIKey.key_hash == key_hash, APIKey.is_active == True)  # noqa: E712
+                .options(selectinload(APIKey.user))
+            )
+            row = r.scalar_one_or_none()
+            if not row:
+                raise ValueError("Invalid API key")
+            user = UserContext(
+                id=row.user.id,
+                email=row.user.email,
+                display_name=row.user.display_name,
+                is_dev=False,
+            )
+
+    async with factory() as session:
+        match name:
+            case "memory.remember":
+                from memory.memory_extractor import extract_from_event
+                from memory import episodic_store, semantic_store, procedural_store
+
+                uid = user.id
+                candidates = extract_from_event(args)
+                stored = []
+                for c in candidates:
+                    ti = c.get("trust_info") or {}
+                    trust_kwargs = dict(
+                        source_type=ti.get("source_type"),
+                        verification_status=ti.get("verification_status"),
+                        trust_score=ti.get("trust_score"),
+                        confidence=ti.get("confidence"),
+                        created_by=uid,
+                    )
+                    if c["layer"] == "episodic":
+                        mem = await episodic_store.store(
+                            session, c["content"],
+                            project=args.get("project"), session_id=args.get("session_id"),
+                            user_id=uid, importance=c["importance"], meta=c.get("meta"),
+                            **trust_kwargs,
+                        )
+                    elif c["layer"] == "semantic":
+                        mem = await semantic_store.store(
+                            session, c["content"],
+                            project=args.get("project"), user_id=uid,
+                            importance=c["importance"], meta=c.get("meta"),
+                            **trust_kwargs,
+                        )
+                    elif c["layer"] == "procedural":
+                        mem = await procedural_store.store(
+                            session, c["content"],
+                            project=args.get("project"),
+                            importance=c["importance"], meta=c.get("meta"),
+                            **trust_kwargs,
+                        )
+                    else:
+                        continue
+                    stored.append({"id": mem.id, "layer": mem.layer})
+                return {"ok": True, "stored": stored}
+
+            case "memory.recall":
+                from context.context_builder import build as build_context
+                from retrieval.retrieval_engine import search as retrieval_search
+
+                uid = user.id if not user.is_dev else None
+                if args.get("token_budget"):
+                    ctx = await build_context(
+                        session, query=args["query"],
+                        project=args.get("project"), session_id=args.get("session_id"),
+                        token_budget=args["token_budget"], user_id=uid,
+                    )
+                    return ctx
+                hits = await retrieval_search(
+                    session, query=args["query"],
+                    project=args.get("project"), user_id=uid,
+                    limit=args.get("limit", 10),
+                )
+                return {"hits": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
+
+            case "memory.search":
+                from retrieval.retrieval_engine import search as retrieval_search
+
+                uid = user.id if not user.is_dev else None
+                hits = await retrieval_search(
+                    session, query=args["query"],
+                    project=args.get("project"), user_id=uid,
+                    limit=args.get("limit", 20),
+                )
+                return {"memories": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
+
+            case "memory.record_outcome":
+                from memory.memory_extractor import extract_from_event
+                from memory import episodic_store, semantic_store, procedural_store
+
+                payload = {"type": "outcome", **args}
+                uid = user.id
+                candidates = extract_from_event(payload)
+                stored = []
+                for c in candidates:
+                    ti = c.get("trust_info") or {}
+                    trust_kwargs = dict(
+                        source_type=ti.get("source_type"),
+                        verification_status=ti.get("verification_status"),
+                        trust_score=ti.get("trust_score"),
+                        confidence=ti.get("confidence"),
+                        created_by=uid,
+                    )
+                    if c["layer"] == "episodic":
+                        mem = await episodic_store.store(
+                            session, c["content"],
+                            project=args.get("project"), session_id=args.get("session_id"),
+                            user_id=uid, importance=c["importance"], meta=c.get("meta"),
+                            **trust_kwargs,
+                        )
+                        stored.append({"id": mem.id, "layer": mem.layer})
+                return {"ok": True, "stored": stored}
+
+            case "skill.list":
+                from storage.models import Skill
+
+                q = select(Skill)
+                if not user.is_dev:
+                    q = q.where(Skill.user_id == user.id)
+                if args.get("project"):
+                    q = q.where(Skill.project == args["project"])
+                if args.get("status"):
+                    q = q.where(Skill.status == args["status"])
+                result = await session.execute(q)
+                skills = result.scalars().all()
+                return {"skills": [
+                    {"id": s.id, "name": s.name, "purpose": s.purpose, "status": s.status}
+                    for s in skills
+                ]}
+
+            case "approval.request":
+                from storage.models import ImprovementProposal
+                from reflections.improvement_planner import create_approval_request
+
+                imp = await session.get(ImprovementProposal, args["improvement_id"])
+                if not imp:
+                    raise ValueError("Improvement not found")
+                if not user.is_dev and imp.user_id and imp.user_id != user.id:
+                    raise ValueError("Improvement not found")
+                approval = await create_approval_request(session, imp)
+                approval.user_id = user.id if not user.is_dev else None
+                return {"approval": {"id": approval.id, "title": approval.title, "status": approval.status}}
+
+            case "approval.status":
+                from storage.models import Approval
+
+                q = select(Approval)
+                if not user.is_dev:
+                    q = q.where(Approval.user_id == user.id)
+                status_filter = args.get("status", "pending")
+                if status_filter and status_filter != "all":
+                    q = q.where(Approval.status == status_filter)
+                q = q.order_by(Approval.created_at.desc()).limit(50)
+                result = await session.execute(q)
+                approvals = result.scalars().all()
+                return {"approvals": [
+                    {"id": a.id, "title": a.title, "status": a.status}
+                    for a in approvals
+                ]}
+
+            case "reflection.log":
+                from reflections import reflection_engine
+
+                ref = await reflection_engine.log_reflection(
+                    session, trigger="manual",
+                    observations=args["observations"], lessons=args["lessons"],
+                    project=args.get("project"),
+                    user_id=user.id if not user.is_dev else None,
+                )
+                return {"id": ref.id, "trigger": ref.trigger, "created_at": str(ref.created_at)}
+
+            case "improvement.propose":
+                from reflections import improvement_planner
+
+                imp = await improvement_planner.propose(
+                    session,
+                    improvement_type=args["improvement_type"],
+                    title=args["title"],
+                    reason=args["reason"],
+                    current_behavior=args["current_behavior"],
+                    proposed_behavior=args["proposed_behavior"],
+                    expected_benefit=args["expected_benefit"],
+                    project=args.get("project"),
+                    user_id=user.id if not user.is_dev else None,
+                )
+                return {"id": imp.id, "title": imp.title, "status": imp.status}
+
+            case _:
+                raise ValueError(f"Unknown tool: {name}")
+
+
+# ── JSON-RPC helpers ──────────────────────────────────────────────────────────
+
+def _ok(result: Any, req_id: Any) -> dict:
+    return {"jsonrpc": "2.0", "result": result, "id": req_id}
+
+
+def _err(code: int, message: str, req_id: Any) -> dict:
+    return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id}
+
+
+async def _handle_request(msg: dict, api_key: str) -> dict:
+    """Process one JSON-RPC request (msg with id); always returns a response."""
+    method = msg.get("method", "")
+    params = msg.get("params") or {}
+    req_id = msg.get("id")
+
+    try:
+        match method:
+            case "initialize":
+                result = {
+                    "protocolVersion": _MCP_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mimir", "version": "1.0"},
+                }
+                return _ok(result, req_id)
+
+            case "ping":
+                return _ok({}, req_id)
+
+            case "tools/list":
+                return _ok({"tools": _TOOLS}, req_id)
+
+            case "tools/call":
+                tool_name = params.get("name", "")
+                tool_args = params.get("arguments") or {}
+                if tool_name not in _TOOL_NAMES:
+                    return _err(-32601, f"Unknown tool: {tool_name}", req_id)
+                data = await _call_tool(tool_name, tool_args, api_key)
+                return _ok(
+                    {"content": [{"type": "text", "text": json.dumps(data, default=str)}]},
+                    req_id,
+                )
+
+            case _:
+                return _err(-32601, f"Method not found: {method}", req_id)
+
+    except HTTPException as exc:
+        return _err(-32001, exc.detail, req_id)
+    except Exception as exc:
+        return _err(-32000, str(exc), req_id)
+
+
+def _is_notification(msg: dict) -> bool:
+    """JSON-RPC notification: has method but no id."""
+    return "method" in msg and "id" not in msg
+
+
+def _sse_event(data: str) -> str:
+    """Format one SSE event containing a JSON-RPC message."""
+    return f"event: message\ndata: {data}\n\n"
+
+
+async def _sse_response(responses: list[dict]) -> StreamingResponse:
+    """Wrap JSON-RPC responses in a text/event-stream SSE response."""
+    payload = responses[0] if len(responses) == 1 else responses
+    body = json.dumps(payload, default=str)
+
+    async def _gen():
+        yield _sse_event(body)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── HTTP endpoints ────────────────────────────────────────────────────────────
+
+@router.post("/mcp")
+async def mcp_post(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_api_key: str = Header(default=""),
+    accept: str = Header(default=""),
+) -> Response:
+    """MCP Streamable HTTP POST — client-to-server JSON-RPC messages.
+
+    Accepts Authorization: Bearer <key|oauth_token> or X-API-Key: <key>.
+    Returns text/event-stream SSE when client sends Accept: text/event-stream,
+    otherwise application/json.
+    Notifications (no id) → 202 Accepted per spec.
+    """
+    api_key = await _resolve_api_key(authorization, x_api_key, request)
+
+    try:
+        body = await request.json()
+    except Exception:
+        err = _err(-32700, "Parse error: invalid JSON", None)
+        return _json_rpc_response(err, accept)
+
+    messages = body if isinstance(body, list) else [body]
+
+    # Process all messages; collect responses for requests only
+    responses: list[dict] = []
+    for msg in messages:
+        if _is_notification(msg):
+            # Notifications are fire-and-forget; ignore any errors
+            pass
+        else:
+            resp = await _handle_request(msg, api_key)
+            responses.append(resp)
+
+    # Spec §6.4.1: all-notification batches → 202 Accepted
+    if not responses:
+        return Response(status_code=202)
+
+    # Return SSE format when client accepts it (Cursor requires this)
+    if "text/event-stream" in accept:
+        return await _sse_response(responses)
+
+    payload = responses[0] if len(responses) == 1 else responses
+    return Response(
+        content=json.dumps(payload, default=str),
+        media_type="application/json",
+    )
+
+
+def _json_rpc_response(data: Any, accept: str) -> Response:
+    body = json.dumps(data, default=str)
+    if "text/event-stream" in accept:
+        async def _gen():
+            yield _sse_event(body)
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+    return Response(content=body, media_type="application/json")
+
+
+@router.get("/mcp")
+async def mcp_get(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_api_key: str = Header(default=""),
+) -> StreamingResponse:
+    """MCP Streamable HTTP GET — server-to-client SSE channel.
+
+    Required by the 2025-03-26 spec for server-initiated messages.
+    Mimir does not push server events, but we keep the channel open with
+    periodic keepalive comments so Cursor stays connected.
+    """
+    await _resolve_api_key(authorization, x_api_key, request)
+
+    async def _keepalive() -> AsyncIterator[str]:
+        # Initial comment — some clients wait for the first byte
+        yield ": connected\n\n"
+        while True:
+            await asyncio.sleep(15)
+            yield ": keepalive\n\n"
+
+    return StreamingResponse(
+        _keepalive(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx buffering for SSE
+        },
+    )
+
+
+@router.delete("/mcp")
+async def mcp_delete(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_api_key: str = Header(default=""),
+) -> Response:
+    """MCP session teardown — stateless so always succeeds."""
+    await _resolve_api_key(authorization, x_api_key, request)
+    return Response(status_code=200)

@@ -1,0 +1,160 @@
+version: "3.9"
+
+# Profiles:
+#   local         — SQLite single-user local deployment (OAuth enabled, single_user mode)
+#   prod-postgres — Postgres-backed multi-user production deployment (multi_user mode)
+#
+# Usage:
+#   docker compose --profile local up --build           # SQLite + single_user auth
+#   docker compose --profile prod-postgres up --build   # Postgres + multi_user auth
+#
+# After starting, create the owner account:
+#   docker compose exec api python -m mimir.auth.create_owner \
+#     --email you@example.com --display-name "Your Name"
+
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # LOCAL PROFILE (SQLite + single_user auth)
+  # ──────────────────────────────────────────────────────────────────────────
+
+  api:
+    build: .
+    profiles: ["local"]
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8787"
+    ports:
+      - "8787:8787"
+    volumes:
+      - mimir_data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MIMIR_DATA_DIR: /app/data
+      MIMIR_VECTOR_DIR: /app/data/vectors
+      MIMIR_AUTH_MODE: single_user
+      MIMIR_PUBLIC_URL: http://127.0.0.1:8787
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build: .
+    profiles: ["local"]
+    command: python -m worker.scheduler
+    volumes:
+      - mimir_data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MIMIR_DATA_DIR: /app/data
+      MIMIR_VECTOR_DIR: /app/data/vectors
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    profiles: ["local"]
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # POSTGRES PROFILE (prod-postgres)
+  # ──────────────────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["prod-postgres"]
+    environment:
+      POSTGRES_USER: mimir
+      POSTGRES_PASSWORD: mimir
+      POSTGRES_DB: mimir
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mimir -d mimir"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  api-pg:
+    build: .
+    profiles: ["prod-postgres"]
+    command: sh -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8787"
+    ports:
+      - "8787:8787"
+    volumes:
+      - mimir_data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MIMIR_DATA_DIR: /app/data
+      MIMIR_VECTOR_DIR: /app/data/vectors
+      MIMIR_DATABASE_URL: postgresql+asyncpg://mimir:mimir@postgres:5432/mimir
+      MIMIR_DB_POOL_SIZE: "10"
+      MIMIR_DB_MAX_OVERFLOW: "20"
+      MIMIR_DB_POOL_TIMEOUT: "30"
+      MIMIR_AUTH_MODE: multi_user
+      MIMIR_ALLOW_REGISTRATION: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  worker-pg:
+    build: .
+    profiles: ["prod-postgres"]
+    command: python -m worker.scheduler
+    volumes:
+      - mimir_data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MIMIR_DATA_DIR: /app/data
+      MIMIR_VECTOR_DIR: /app/data/vectors
+      MIMIR_DATABASE_URL: postgresql+asyncpg://mimir:mimir@postgres:5432/mimir
+      MIMIR_DB_POOL_SIZE: "10"
+      MIMIR_DB_MAX_OVERFLOW: "20"
+      MIMIR_DB_POOL_TIMEOUT: "30"
+    depends_on:
+      api-pg:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web-pg:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    profiles: ["prod-postgres"]
+    ports:
+      - "5173:80"
+    depends_on:
+      api-pg:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mimir_data:
+  postgres_data:

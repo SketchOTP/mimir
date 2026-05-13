@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mimir"
+version = "0.1.0-rc1"
+description = "Standalone AI Memory + Learning Core"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    "tiktoken>=0.7",
+    "apscheduler>=3.10",
+    "mcp>=1.0",
+    "slack-sdk>=3.30",
+    "pywebpush>=2.0",
+    "python-multipart>=0.0.9",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx", "ruff", "mypy"]
+
+[project.scripts]
+mimir-api   = "api.main:run"
+mimir-mcp   = "mcp.server:run"
+mimir-worker = "worker.scheduler:run"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "mimir", "storage", "memory", "skills", "reflections",
+    "approvals", "notifications", "context", "metrics",
+    "retrieval", "api", "mcp", "sdk", "worker",
+    "evals", "graph", "simulation", "telemetry",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100

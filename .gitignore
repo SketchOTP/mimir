@@ -42,8 +42,11 @@ backups/
 # ── Generated reports (created by evals/runner.py and scripts) ─────────────
 reports/**/*.json
 reports/**/*.md
+evals/reports/*.json
+evals/reports/*.md
 # keep .gitkeep placeholders
 !reports/**/.gitkeep
+!evals/reports/.gitkeep
 
 # ── Frontend build output ───────────────────────────────────────────────────
 web/dist/

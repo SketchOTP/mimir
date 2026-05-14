@@ -37,7 +37,7 @@ _MCP_VERSION = "2024-11-05"
 
 _TOOLS = [
     {
-        "name": "memory.remember",
+        "name": "memory_remember",
         "description": "Store an event or fact in Mimir memory.",
         "inputSchema": {
             "type": "object",
@@ -51,7 +51,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "memory.recall",
+        "name": "memory_recall",
         "description": "Retrieve relevant memories for a query.",
         "inputSchema": {
             "type": "object",
@@ -66,7 +66,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "memory.search",
+        "name": "memory_search",
         "description": "Semantic search across all memory layers.",
         "inputSchema": {
             "type": "object",
@@ -80,7 +80,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "memory.record_outcome",
+        "name": "memory_record_outcome",
         "description": "Record the outcome of a task.",
         "inputSchema": {
             "type": "object",
@@ -95,7 +95,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "skill.list",
+        "name": "skill_list",
         "description": "List available skills.",
         "inputSchema": {
             "type": "object",
@@ -106,7 +106,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "approval.request",
+        "name": "approval_request",
         "description": "Create an approval request for an improvement.",
         "inputSchema": {
             "type": "object",
@@ -117,7 +117,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "approval.status",
+        "name": "approval_status",
         "description": "List pending and recent approvals.",
         "inputSchema": {
             "type": "object",
@@ -127,7 +127,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "reflection.log",
+        "name": "reflection_log",
         "description": "Log a reflection with observations and lessons.",
         "inputSchema": {
             "type": "object",
@@ -140,7 +140,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "improvement.propose",
+        "name": "improvement_propose",
         "description": "Propose a system improvement.",
         "inputSchema": {
             "type": "object",
@@ -160,7 +160,7 @@ _TOOLS = [
         },
     },
     {
-        "name": "project.bootstrap",
+        "name": "project_bootstrap",
         "description": (
             "Ingest a curated project capsule into Mimir for an existing repo. "
             "The caller reads the repo files and passes content as named sections; "
@@ -215,6 +215,20 @@ _TOOLS = [
 ]
 
 _TOOL_NAMES = {t["name"] for t in _TOOLS}
+
+# Dotted legacy aliases → canonical underscore names (not advertised)
+_DOTTED_ALIASES: dict[str, str] = {
+    "memory.remember": "memory_remember",
+    "memory.recall": "memory_recall",
+    "memory.search": "memory_search",
+    "memory.record_outcome": "memory_record_outcome",
+    "skill.list": "skill_list",
+    "approval.request": "approval_request",
+    "approval.status": "approval_status",
+    "reflection.log": "reflection_log",
+    "improvement.propose": "improvement_propose",
+    "project.bootstrap": "project_bootstrap",
+}
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -361,8 +375,10 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
             )
 
     async with factory() as session:
+        # Accept both underscore (canonical) and dotted (legacy) names
+        name = _DOTTED_ALIASES.get(name, name)
         match name:
-            case "memory.remember":
+            case "memory_remember":
                 from memory.memory_extractor import extract_from_event
                 from memory import episodic_store, semantic_store, procedural_store
 
@@ -404,7 +420,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     stored.append({"id": mem.id, "layer": mem.layer})
                 return {"ok": True, "stored": stored}
 
-            case "memory.recall":
+            case "memory_recall":
                 from context.context_builder import build as build_context
                 from retrieval.retrieval_engine import search as retrieval_search
 
@@ -423,7 +439,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 )
                 return {"hits": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
 
-            case "memory.search":
+            case "memory_search":
                 from retrieval.retrieval_engine import search as retrieval_search
 
                 uid = user.id if not user.is_dev else None
@@ -434,7 +450,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 )
                 return {"memories": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
 
-            case "memory.record_outcome":
+            case "memory_record_outcome":
                 from memory.memory_extractor import extract_from_event
                 from memory import episodic_store, semantic_store, procedural_store
 
@@ -461,7 +477,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                         stored.append({"id": mem.id, "layer": mem.layer})
                 return {"ok": True, "stored": stored}
 
-            case "skill.list":
+            case "skill_list":
                 from storage.models import Skill
 
                 q = select(Skill)
@@ -478,7 +494,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     for s in skills
                 ]}
 
-            case "approval.request":
+            case "approval_request":
                 from storage.models import ImprovementProposal
                 from reflections.improvement_planner import create_approval_request
 
@@ -491,7 +507,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 approval.user_id = user.id if not user.is_dev else None
                 return {"approval": {"id": approval.id, "title": approval.title, "status": approval.status}}
 
-            case "approval.status":
+            case "approval_status":
                 from storage.models import Approval
 
                 q = select(Approval)
@@ -508,7 +524,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     for a in approvals
                 ]}
 
-            case "reflection.log":
+            case "reflection_log":
                 from reflections import reflection_engine
 
                 ref = await reflection_engine.log_reflection(
@@ -519,7 +535,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 )
                 return {"id": ref.id, "trigger": ref.trigger, "created_at": str(ref.created_at)}
 
-            case "improvement.propose":
+            case "improvement_propose":
                 from reflections import improvement_planner
 
                 imp = await improvement_planner.propose(
@@ -535,7 +551,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 )
                 return {"id": imp.id, "title": imp.title, "status": imp.status}
 
-            case "project.bootstrap":
+            case "project_bootstrap":
                 from memory import episodic_store, semantic_store, procedural_store
                 from storage.models import Memory as _Memory
                 from datetime import datetime, UTC
@@ -586,11 +602,11 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     "4. project_status.md / project_goal.md (repo truth)\n"
                     "5. Mimir recalled memories (supplemental, not authoritative)\n\n"
                     "MIMIR USAGE RULES:\n"
-                    "- memory.recall: supplemental context and lessons only\n"
-                    "- memory.remember: log outcomes, bugs, lessons at session end\n"
+                    "- memory_recall: supplemental context and lessons only\n"
+                    "- memory_remember: log outcomes, bugs, lessons at session end\n"
                     "- Do not store full source files, secrets, or raw logs\n"
                     "- Bootstrap memories (bootstrap=true in meta) are reference points\n"
-                    "- Rerun project.bootstrap with force=true after major project changes"
+                    "- Rerun project_bootstrap with force=true after major project changes"
                 )
 
                 # Section → (layer, importance, bootstrap_type)
@@ -687,7 +703,7 @@ async def _handle_request(msg: dict, api_key: str) -> dict:
             case "tools/call":
                 tool_name = params.get("name", "")
                 tool_args = params.get("arguments") or {}
-                if tool_name not in _TOOL_NAMES:
+                if tool_name not in _TOOL_NAMES and tool_name not in _DOTTED_ALIASES:
                     return _err(-32601, f"Unknown tool: {tool_name}", req_id)
                 data = await _call_tool(tool_name, tool_args, api_key)
                 return _ok(

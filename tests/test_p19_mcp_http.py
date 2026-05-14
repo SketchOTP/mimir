@@ -5,12 +5,13 @@ Tests:
   - POST /mcp never returns 405
   - GET /mcp does not return 404 (returns SSE stream)
   - initialize handshake returns SSE-format response
-  - tools/list returns all 9 required tools
-  - memory.remember works
-  - memory.recall works
+  - tools/list returns all required tools with valid names (^[A-Za-z0-9_]+$)
+  - memory_remember works
+  - memory_recall works
   - invalid API key returns 401
   - notifications/initialized returns 202
   - cross-user isolation preserved
+  - dotted legacy names are accepted as aliases (not advertised)
 """
 
 from __future__ import annotations
@@ -119,30 +120,37 @@ async def test_mcp_initialize_sse_format(client):
     assert result["serverInfo"]["name"] == "mimir"
 
 
-# ── P19-5: tools/list returns the 9 required tools ───────────────────────────
+# ── P19-5: tools/list returns required tools with valid names ─────────────────
+
+import re
+_VALID_NAME = re.compile(r'^[A-Za-z0-9_]+$')
 
 @pytest.mark.asyncio
 async def test_mcp_lists_tools(client):
-    """tools/list returns all 9 required Cursor tools."""
+    """tools/list returns all required tools; all names match ^[A-Za-z0-9_]+$."""
     r = await _post(client, "tools/list")
     data = _decode_sse(r.text)
     assert "result" in data
-    names = {t["name"] for t in data["result"]["tools"]}
+    tools = data["result"]["tools"]
+    names = {t["name"] for t in tools}
     required = {
-        "memory.remember", "memory.recall", "memory.search",
-        "memory.record_outcome", "skill.list", "approval.request",
-        "approval.status", "reflection.log", "improvement.propose",
+        "memory_remember", "memory_recall", "memory_search",
+        "memory_record_outcome", "skill_list", "approval_request",
+        "approval_status", "reflection_log", "improvement_propose",
+        "project_bootstrap",
     }
     assert required.issubset(names), f"Missing: {required - names}"
+    invalid = [n for n in names if not _VALID_NAME.match(n)]
+    assert not invalid, f"Invalid tool names (dots not allowed): {invalid}"
 
 
-# ── P19-6: memory.remember works ─────────────────────────────────────────────
+# ── P19-6: memory_remember works ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_mcp_memory_remember(client):
-    """tools/call memory.remember stores a memory and returns {ok, stored}."""
+    """tools/call memory_remember stores a memory and returns {ok, stored}."""
     r = await _post(client, "tools/call", {
-        "name": "memory.remember",
+        "name": "memory_remember",
         "arguments": {
             "type": "fact",
             "content": "P19.1 MCP HTTP test: Cursor prefers dark mode",
@@ -156,13 +164,13 @@ async def test_mcp_memory_remember(client):
     assert isinstance(payload.get("stored"), list)
 
 
-# ── P19-7: memory.recall works ────────────────────────────────────────────────
+# ── P19-7: memory_recall works ────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_mcp_memory_recall(client):
-    """tools/call memory.recall returns hits for a stored memory."""
+    """tools/call memory_recall returns hits for a stored memory."""
     await _post(client, "tools/call", {
-        "name": "memory.remember",
+        "name": "memory_remember",
         "arguments": {
             "type": "fact",
             "content": "P19.1 recall test: agent uses vim keybindings",
@@ -171,7 +179,7 @@ async def test_mcp_memory_recall(client):
     })
 
     r = await _post(client, "tools/call", {
-        "name": "memory.recall",
+        "name": "memory_recall",
         "arguments": {"query": "vim keybindings", "project": "p19_recall"},
     })
     data = _decode_sse(r.text)
@@ -247,18 +255,19 @@ async def test_mcp_cross_user_isolation(client, app):
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_listed_in_tools(client):
-    """tools/list includes project.bootstrap."""
+    """tools/list includes project_bootstrap with a valid name."""
     r = await _post(client, "tools/list")
     data = _decode_sse(r.text)
     names = {t["name"] for t in data["result"]["tools"]}
-    assert "project.bootstrap" in names
+    assert "project_bootstrap" in names
+    assert "project.bootstrap" not in names, "Dotted name must not be advertised"
 
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_requires_project(client):
-    """project.bootstrap returns an error when project is missing."""
+    """project_bootstrap returns an error when project is missing."""
     r = await _post(client, "tools/call", {
-        "name": "project.bootstrap",
+        "name": "project_bootstrap",
         "arguments": {"profile": "some content"},
     })
     data = _decode_sse(r.text)
@@ -267,9 +276,9 @@ async def test_mcp_bootstrap_requires_project(client):
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_writes_memories(client):
-    """project.bootstrap stores memories and returns stored list."""
+    """project_bootstrap stores memories and returns stored list."""
     r = await _post(client, "tools/call", {
-        "name": "project.bootstrap",
+        "name": "project_bootstrap",
         "arguments": {
             "project": "bootstrap_test_writes",
             "repo_path": "/test/repo",
@@ -299,13 +308,13 @@ async def test_mcp_bootstrap_idempotency_guard(client):
         "constraints": "Never break prod.",
     }
     # First call — should succeed
-    r1 = await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+    r1 = await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
     d1 = _decode_sse(r1.text)
     p1 = json.loads(d1["result"]["content"][0]["text"])
     assert p1["ok"] is True
 
     # Second call without force — should be blocked
-    r2 = await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+    r2 = await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
     d2 = _decode_sse(r2.text)
     p2 = json.loads(d2["result"]["content"][0]["text"])
     assert p2["ok"] is False
@@ -314,13 +323,13 @@ async def test_mcp_bootstrap_idempotency_guard(client):
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_force_overwrites(client):
-    """project.bootstrap with force=true succeeds even when memories exist."""
+    """project_bootstrap with force=true succeeds even when memories exist."""
     project = "bootstrap_test_force"
     args = {"project": project, "profile": "First run."}
-    await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+    await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
 
     r = await _post(client, "tools/call", {
-        "name": "project.bootstrap",
+        "name": "project_bootstrap",
         "arguments": {**args, "profile": "Second run.", "force": True},
     })
     data = _decode_sse(r.text)
@@ -332,7 +341,7 @@ async def test_mcp_bootstrap_force_overwrites(client):
 async def test_mcp_bootstrap_skips_empty_sections(client):
     """Sections not provided are listed in skipped, not stored."""
     r = await _post(client, "tools/call", {
-        "name": "project.bootstrap",
+        "name": "project_bootstrap",
         "arguments": {
             "project": "bootstrap_test_skip",
             "profile": "Only profile provided.",
@@ -345,3 +354,29 @@ async def test_mcp_bootstrap_skips_empty_sections(client):
     assert "project_profile" in types_stored
     assert "testing_protocol" in payload["skipped"]
     assert "procedural_lesson" in payload["skipped"]
+
+
+# ── P19-11: dotted legacy aliases are accepted but not advertised ─────────────
+
+@pytest.mark.asyncio
+async def test_mcp_dotted_alias_accepted(client):
+    """Legacy dotted names (memory.remember) work but are not in tools/list."""
+    # Dotted name must not appear in tools/list
+    r = await _post(client, "tools/list")
+    data = _decode_sse(r.text)
+    names = {t["name"] for t in data["result"]["tools"]}
+    assert "memory.remember" not in names
+
+    # But dotted name must still be callable as a legacy alias
+    r2 = await _post(client, "tools/call", {
+        "name": "memory.remember",
+        "arguments": {
+            "type": "fact",
+            "content": "P19.11 legacy alias test",
+            "project": "p19_legacy_alias",
+        },
+    })
+    data2 = _decode_sse(r2.text)
+    assert "result" in data2, f"Dotted alias rejected: {data2}"
+    payload = json.loads(data2["result"]["content"][0]["text"])
+    assert payload.get("ok") is True

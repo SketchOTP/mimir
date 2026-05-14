@@ -80,15 +80,18 @@ If OAuth is unavailable, use a static API key directly:
 
 | Tool | Description |
 |------|-------------|
-| `memory.remember` | Store an event or fact |
-| `memory.recall` | Retrieve relevant memories for a query |
-| `memory.search` | Semantic search across all memory layers |
-| `memory.record_outcome` | Record the outcome of a task |
-| `skill.list` | List available skills |
-| `approval.request` | Create an approval request for an improvement |
-| `approval.status` | List pending and recent approvals |
-| `reflection.log` | Log observations and lessons |
-| `improvement.propose` | Propose a system improvement |
+| `memory_remember` | Store an event or fact |
+| `memory_recall` | Retrieve relevant memories for a query |
+| `memory_search` | Semantic search across all memory layers |
+| `memory_record_outcome` | Record the outcome of a task |
+| `skill_list` | List available skills |
+| `approval_request` | Create an approval request for an improvement |
+| `approval_status` | List pending and recent approvals |
+| `reflection_log` | Log observations and lessons |
+| `improvement_propose` | Propose a system improvement |
+| `project_bootstrap` | Seed Mimir with a repo's project capsule |
+
+> **Note:** Legacy dotted names (`memory.remember`, etc.) are accepted as aliases for backward compatibility but are not advertised. Cursor requires `^[A-Za-z0-9_]+$` names.
 
 ---
 
@@ -110,7 +113,7 @@ curl -s -X POST http://192.168.1.246:8787/mcp \
     "method": "tools/call",
     "id": 2,
     "params": {
-      "name": "memory.remember",
+      "name": "memory_remember",
       "arguments": {
         "type": "fact",
         "content": "Cursor is configured with Mimir MCP",

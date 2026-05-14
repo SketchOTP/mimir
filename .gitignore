@@ -101,3 +101,9 @@ chromadb/
 # ── Logs ────────────────────────────────────────────────────────────────────
 *.log
 logs/
+
+# ── Local project/rule docs (must stay local) ───────────────────────────────
+project_*.md
+AGENTS.md
+CLAUDE.md
+.cursor/

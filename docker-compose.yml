@@ -3,29 +3,28 @@ version: "3.9"
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  Mimir — Docker Compose                                         ║
 # ╠══════════════════════════════════════════════════════════════════╣
-# ║  Quick start (local single-user, recommended):                  ║
-# ║    docker compose up -d                                         ║
-# ║    # then open: http://127.0.0.1:5173                           ║
+# ║  Quick start (no .env required):                                 ║
+# ║    docker compose up -d                                          ║
+# ║    → API:     http://127.0.0.1:8787                              ║
+# ║    → Web UI:  http://127.0.0.1:5173                              ║
 # ║                                                                  ║
-# ║  LAN server (accessible from Cursor on another machine):        ║
+# ║  LAN server (for Cursor on a remote/SSH machine):                ║
 # ║    ./scripts/start_lan.sh                                        ║
 # ║                                                                  ║
-# ║  Profiles:                                                       ║
-# ║    (default / no profile)  SQLite + single_user auth            ║
-# ║    local                   same as default (explicit)           ║
-# ║    prod-postgres            Postgres + multi_user auth          ║
+# ║  Production (Postgres + multi-user):                             ║
+# ║    docker compose --profile prod-postgres up -d                  ║
 # ║                                                                  ║
-# ║  Health check:  ./scripts/doctor.sh                             ║
+# ║  Health check:                                                   ║
+# ║    ./scripts/doctor.sh                                           ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 services:
   # ──────────────────────────────────────────────────────────────────────────
-  # LOCAL PROFILE (SQLite + single_user auth)
+  # DEFAULT — SQLite + single_user auth (no profile flag required)
   # ──────────────────────────────────────────────────────────────────────────
 
   api:
     build: .
-    profiles: ["local"]
     command: sh -c "alembic upgrade head && uvicorn api.main:app --host 0.0.0.0 --port 8787"
     ports:
       - "8787:8787"
@@ -39,6 +38,8 @@ services:
       MIMIR_VECTOR_DIR: /app/data/vectors
       MIMIR_AUTH_MODE: single_user
       MIMIR_PUBLIC_URL: http://127.0.0.1:8787
+      MIMIR_REQUIRE_HTTPS: "false"
+      MIMIR_ALLOW_REGISTRATION: "false"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/health')"]
       interval: 10s
@@ -49,7 +50,6 @@ services:
 
   worker:
     build: .
-    profiles: ["local"]
     command: python -m worker.scheduler
     volumes:
       - mimir_data:/app/data
@@ -68,7 +68,6 @@ services:
     build:
       context: web
       dockerfile: Dockerfile
-    profiles: ["local"]
     ports:
       - "5173:80"
     depends_on:
@@ -77,7 +76,8 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────────────────
-  # POSTGRES PROFILE (prod-postgres)
+  # POSTGRES PROFILE — opt-in for multi-user/production deployments
+  # Usage: docker compose --profile prod-postgres up -d
   # ──────────────────────────────────────────────────────────────────────────
 
   postgres:

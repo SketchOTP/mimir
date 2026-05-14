@@ -59,12 +59,13 @@ if DOC=$(curl -sf "$BASE_URL/api/system/doctor" 2>/dev/null); then
     DB_MODE=$(echo "$DOC" | grep -o '"database_mode":"[^"]*"' | cut -d'"' -f4 || true)
     OWNER=$(echo "$DOC" | grep -o '"owner_exists":[^,}]*' | cut -d: -f2 | tr -d ' ' || true)
     MCP_OK=$(echo "$DOC" | grep -o '"mcp_reachable":[^,}]*' | cut -d: -f2 | tr -d ' ' || true)
+    MCP_STATUS=$(echo "$DOC" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('mcp_status',''))" 2>/dev/null || true)
 
     [ "$SETUP_STATUS" = "ok" ] && pass "Setup status: ok" || warn "Setup status: $SETUP_STATUS"
     pass "Auth mode: ${AUTH_MODE:-unknown}"
     pass "Database: ${DB_MODE:-unknown}"
     [ "$OWNER" = "true" ] && pass "Owner account exists" || fail "No owner account — open $BASE_URL/setup"
-    [ "$MCP_OK" = "true" ] && pass "MCP endpoint reachable" || warn "MCP endpoint not responding (may be auth-gated)"
+    [ "$MCP_OK" = "true" ] && pass "MCP: ${MCP_STATUS:-reachable}" || warn "MCP: ${MCP_STATUS:-not responding}"
 
     # Print any warnings from the doctor
     if echo "$DOC" | grep -q '"code":'; then

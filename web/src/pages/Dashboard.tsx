@@ -112,6 +112,38 @@ export default function Dashboard() {
         }
       />
       <div className="p-6 space-y-6">
+        {/* First-run setup prompt — shown when Mimir is running but has no owner yet */}
+        {!loading && onboarding && !onboarding.owner_exists && (
+          <div className="rounded-lg border border-brand-600/50 bg-brand-950/30 px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-slate-100">Mimir is running — finish setup</h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  No owner account exists yet. Create one to generate your API key and connect Cursor.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <a
+                  href={onboarding.urls.first_run_setup}
+                  className="inline-flex items-center rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-500"
+                >
+                  Create owner &amp; get API key →
+                </a>
+                <a
+                  href={onboarding.urls.connection_settings}
+                  className="inline-flex items-center rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:border-slate-400"
+                >
+                  Connection settings
+                </a>
+              </div>
+            </div>
+            <div className="mt-3 text-xs text-slate-500">
+              Running in <span className="text-slate-300">{onboarding.auth_mode}</span> mode ·
+              MCP: <span className="text-slate-300">{onboarding.urls.mcp_url}</span>
+            </div>
+          </div>
+        )}
+
         {error && (
           <div className="rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
             <strong className="block text-amber-100">Dashboard warning</strong>

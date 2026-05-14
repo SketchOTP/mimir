@@ -49,21 +49,38 @@ def _port_in_use(port: int) -> bool:
 
 
 async def _check_mcp(mcp_url: str) -> dict:
-    try:
-        import urllib.request
-        import json as _json
-        payload = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
-        req = urllib.request.Request(
-            mcp_url,
-            data=payload,
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-            method="POST",
-        )
-        loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=3))
-        return {"ok": True, "status_code": resp.status}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)[:120]}
+    """POST to /mcp and classify the response.
+
+    Returns:
+      ok=True  if 200 (tools/list returned) or 401 (endpoint reachable, auth required)
+      ok=False if connection refused, timeout, or unexpected error
+    Also returns auth_required=True when the endpoint responded with 401.
+    """
+    import urllib.request
+    import urllib.error
+    import json as _json
+
+    payload = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+    req = urllib.request.Request(
+        mcp_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        method="POST",
+    )
+    loop = asyncio.get_event_loop()
+
+    def _do_request():
+        try:
+            resp = urllib.request.urlopen(req, timeout=3)
+            return {"ok": True, "status_code": resp.status, "auth_required": False}
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                return {"ok": True, "status_code": 401, "auth_required": True}
+            return {"ok": False, "status_code": e.code, "error": f"HTTP {e.code}", "auth_required": False}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:120], "auth_required": False}
+
+    return await loop.run_in_executor(None, _do_request)
 
 
 @router.get("/api/system/doctor")
@@ -133,10 +150,21 @@ async def system_doctor(
             "severity": "warning",
             "message": f"MCP endpoint did not respond: {mcp_check.get('error', 'unknown')}",
         })
+    # 401 is fine — endpoint is reachable, just requires auth (expected in non-dev mode)
 
     status = "ok" if not any(w["severity"] == "critical" for w in warnings) else "needs_setup"
     if warnings and status == "ok":
         status = "warnings"
+
+    mcp_reachable = mcp_check["ok"]
+    mcp_auth_required = mcp_check.get("auth_required", False)
+    # Summarise MCP status in human-readable terms
+    if mcp_reachable and mcp_auth_required:
+        mcp_status_text = "reachable, auth required"
+    elif mcp_reachable:
+        mcp_status_text = "reachable, tools/list OK"
+    else:
+        mcp_status_text = f"unreachable: {mcp_check.get('error', 'unknown')}"
 
     return {
         "status": status,
@@ -144,12 +172,14 @@ async def system_doctor(
         "auth_mode": auth_mode,
         "public_url": public_base,
         "mcp_url": mcp_url,
+        "mcp_status": mcp_status_text,
         "web_url": f"{public_base}/",
         "database_mode": "postgres" if settings.database_url else "sqlite",
         "owner_exists": owner_exists,
         "bootstrapped_projects": bootstrapped,
         "port_listening": port_ok,
-        "mcp_reachable": mcp_check["ok"],
+        "mcp_reachable": mcp_reachable,
+        "mcp_auth_required": mcp_auth_required,
         "mcp_last_connection": mcp_status,
         "warnings": warnings,
         "fix_suggestions": fix_suggestions,

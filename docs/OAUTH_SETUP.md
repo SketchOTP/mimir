@@ -1,6 +1,6 @@
 # Mimir OAuth 2.1 / PKCE Setup
 
-Mimir supports OAuth 2.1 with PKCE (RFC 7636) so Cursor and other MCP clients can authenticate without manually copying API keys.
+Mimir supports OAuth 2.1 with PKCE (RFC 7636) for normal local/browser-capable Cursor setups. OAuth is optional: MCP also supports API-key Bearer auth directly, which remains the recommended path for SSH, headless, remote-development, and RPi5 workflows.
 
 ## Auth Modes
 
@@ -11,6 +11,18 @@ Mimir supports OAuth 2.1 with PKCE (RFC 7636) so Cursor and other MCP clients ca
 | `multi_user` | `multi_user` | Team / public deployment |
 
 Legacy: `auth_mode=prod` maps to `multi_user` for backward compatibility.
+
+## When To Use OAuth vs API Key
+
+| Setup | Recommended auth |
+|------|------------------|
+| Local Cursor with browser access | OAuth |
+| Cursor over SSH | API key |
+| Headless client | API key |
+| Remote development | API key |
+| RPi5 workflow | API key |
+
+MCP setup does not require OAuth.
 
 ---
 
@@ -57,6 +69,8 @@ Copy the API key printed — it's shown only once.
 ```
 
 When Cursor connects, it will open your browser to the OAuth authorize page. Enter your API key to grant access. Cursor stores the token — you won't need to enter it again.
+
+`MIMIR_PUBLIC_URL` must be reachable from the machine running Cursor, not just from the server hosting Mimir.
 
 ### 5. Verify
 
@@ -146,9 +160,9 @@ Refresh tokens are rotated on use (single-use).
 
 ---
 
-## Manual Bearer fallback
+## API-key MCP setup
 
-If OAuth is not needed, use a static API key directly:
+If OAuth is not appropriate, use a static API key directly. This is the recommended path for Cursor over SSH, headless clients, remote development, and RPi5 workflows:
 
 ```json
 {
@@ -168,7 +182,10 @@ If OAuth is not needed, use a static API key directly:
 ## Troubleshooting
 
 **Cursor shows "Authorization Required" repeatedly**  
-→ Check that `MIMIR_PUBLIC_URL` matches the URL Cursor is connecting to.
+→ Check that `MIMIR_PUBLIC_URL` matches the URL Cursor is connecting to and is reachable from the machine running Cursor.
+
+**Cursor is running over SSH or without browser access**  
+→ Use API-key Bearer auth. Device-code OAuth is not implemented; OAuth should not be the only auth path for headless workflows.
 
 **Browser shows "Setup Required"**  
 → Run `python -m mimir.auth.create_owner` first.

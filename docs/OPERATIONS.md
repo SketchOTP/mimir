@@ -1,5 +1,21 @@
 # Operations Guide
 
+## Current Live Runtime
+
+Current live Atlas deployment uses the Postgres-backed `api-pg` container on port `8787`.
+The older SQLite/local `mimir-api-1` container is intentionally stopped in this runtime.
+If `localhost:8787` behaves differently than expected, first confirm which container owns the port:
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+docker compose --profile prod-postgres ps
+```
+
+Expected current state:
+- `api-pg` bound to `0.0.0.0:8787->8787/tcp`
+- old `mimir-api-1` stopped
+- live Atlas/MCP traffic terminating at `api-pg`
+
 ## Health and Readiness
 
 ```bash

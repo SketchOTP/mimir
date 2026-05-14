@@ -121,7 +121,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for the full variable reference.
 
 ## Cursor MCP Configuration
 
-After starting Mimir and creating an owner, add to Cursor's MCP settings:
+For normal local/browser-capable Cursor setups, add:
 
 ```json
 {
@@ -134,6 +134,23 @@ After starting Mimir and creating an owner, add to Cursor's MCP settings:
 ```
 
 Cursor will open a browser window for OAuth authentication on first use.
+
+If you use OAuth, `MIMIR_PUBLIC_URL` must be reachable from the machine running Cursor, not just from the server itself.
+
+For Cursor over SSH, headless clients, remote development, and RPi5 workflows, use API-key Bearer auth instead:
+
+```json
+{
+  "mcpServers": {
+    "mimir": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
 
 For a server deployment:
 

@@ -2,7 +2,7 @@
 
 **Self-hostable AI memory server — episodic, semantic, procedural, and graph memory for any MCP-compatible AI agent.**
 
-Mimir gives your AI assistant the kind of memory that persists across sessions, learns from what works, decays what is stale, and refuses to store what is adversarial. It connects to Cursor (and any MCP client) in 60 seconds via OAuth 2.1. No cloud dependency, no data leaving your network.
+Mimir gives your AI assistant the kind of memory that persists across sessions, learns from what works, decays what is stale, and refuses to store what is adversarial. It connects to Cursor and other MCP clients in 60 seconds, with OAuth for browser-capable local setups and API-key Bearer auth for SSH, headless, and remote workflows. No cloud dependency, no data leaving your network.
 
 Named for the Norse keeper of knowledge at the root of Yggdrasil.
 
@@ -32,7 +32,8 @@ It is not a RAG system bolted onto a file system. It is a purpose-built memory s
 | **Simulation + planning** | Multi-path outcome simulation with risk scoring, rollback estimation, and approval gating |
 | **Skills system** | Reusable agent procedures that can be proposed, tested, approved, and promoted |
 | **Approval workflow** | High-risk actions (risky simulations, irreversible procedures, auto-improvements) require human approval before execution |
-| **OAuth 2.1 / PKCE** | Full RFC-compliant authorization server built in — Cursor opens browser, enters key once, connects forever |
+| **OAuth 2.1 / PKCE** | Optional browser-based auth for normal local Cursor setups |
+| **API-key Bearer auth** | First-class MCP auth for Cursor over SSH, headless clients, remote development, and RPi5 workflows |
 | **Multi-user isolation** | Every memory, retrieval, and graph query is scoped by `user_id` across all layers and all workers |
 | **React PWA** | Dashboard, memory browser, approval queue, simulation planner, telemetry — works offline |
 | **REST + MCP + Python SDK** | Three integration surfaces: HTTP REST, MCP Streamable HTTP (Cursor), Python SDK |
@@ -72,7 +73,22 @@ Add to Cursor — **Settings → MCP → Add Server**:
 
 Cursor opens a browser, you enter your API key, you authorize. That is it — Mimir is now Cursor's persistent memory.
 
-See [docs/CURSOR_MCP_SETUP.md](docs/CURSOR_MCP_SETUP.md) for OAuth flow details, manual Bearer fallback, and team setup.
+For SSH, remote, or headless Cursor setups, use Bearer API-key auth instead of OAuth:
+
+```json
+{
+  "mcpServers": {
+    "mimir": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
+
+See [docs/CURSOR_MCP_SETUP.md](docs/CURSOR_MCP_SETUP.md) for the local OAuth flow, API-key MCP setup, and remote-hosting notes.
 
 ---
 
@@ -116,7 +132,7 @@ Cursor (and any MCP client) calls these tools directly:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Cursor / any MCP client                                    │
-│  POST /mcp  (MCP Streamable HTTP, OAuth 2.1 Bearer)         │
+│  POST /mcp  (MCP Streamable HTTP, Bearer auth)              │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -226,7 +242,11 @@ The simulation engine generates multi-path execution plans (branching depth ≤ 
 
 ### OAuth 2.1 / PKCE
 
-Mimir ships a full RFC-compliant OAuth 2.1 authorization server (`api/routes/oauth.py`) — dynamic client registration (RFC 7591), PKCE S256 challenge (RFC 7636), authorization code grant, refresh token rotation, token revocation (RFC 7009), and protected resource metadata discovery (RFC 9728). Tokens are stored as SHA-256 hashes; revoked tokens are permanently blocked and cannot fall through to dev-mode auth paths.
+Mimir ships a full RFC-compliant OAuth 2.1 authorization server (`api/routes/oauth.py`) — dynamic client registration (RFC 7591), PKCE S256 challenge (RFC 7636), authorization code grant, refresh token rotation, token revocation (RFC 7009), and protected resource metadata discovery (RFC 9728). This is intended for normal browser-capable local/client setups. Tokens are stored as SHA-256 hashes; revoked tokens are permanently blocked and cannot fall through to dev-mode auth paths.
+
+### API-key Bearer auth
+
+MCP setup does not require OAuth. `Authorization: Bearer <API_KEY>` remains a supported first-class path for Cursor over SSH, headless clients, remote development, and RPi5 workflows. If a client cannot complete a browser redirect flow, use an API key directly.
 
 ---
 

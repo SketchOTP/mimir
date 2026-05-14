@@ -39,6 +39,37 @@ async def test_connection_settings_page_loads(client):
 
 
 @pytest.mark.anyio
+async def test_connection_onboarding_exposes_guided_urls_without_auth(client):
+    response = await client.get("/api/connection/onboarding")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["urls"]["dashboard"].endswith("/")
+    assert body["urls"]["connection_settings"].endswith("/settings/connection")
+    assert body["urls"]["mcp_url"].endswith("/mcp")
+    assert '"mcpServers"' in body["generated"]["oauth_local"]
+
+
+@pytest.mark.anyio
+async def test_connection_onboarding_marks_owner_presence(app, client):
+    from storage.database import get_session_factory
+    from storage.models import User
+
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(User(
+            id=uuid.uuid4().hex,
+            email=f"owner-{uuid.uuid4().hex[:8]}@test.com",
+            display_name="Owner",
+            role="owner",
+        ))
+        await session.commit()
+
+    response = await client.get("/api/connection/onboarding")
+    assert response.status_code == 200
+    assert response.json()["owner_exists"] is True
+
+
+@pytest.mark.anyio
 async def test_connection_profile_can_be_read(app, client):
     from storage.database import get_session_factory
 

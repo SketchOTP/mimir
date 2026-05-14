@@ -1,6 +1,6 @@
 # Cursor MCP Setup — Mimir Remote Server
 
-Mimir exposes a Streamable HTTP MCP endpoint at `/mcp`. Cursor connects via OAuth 2.1 / PKCE — **no manual API key copy-paste required**.
+Mimir exposes a Streamable HTTP MCP endpoint at `/mcp`. Use OAuth for normal local/browser-capable Cursor setups. Use API-key Bearer auth for Cursor over SSH, headless clients, remote development, and RPi5 workflows.
 
 ---
 
@@ -12,7 +12,21 @@ Mimir exposes a Streamable HTTP MCP endpoint at `/mcp`. Cursor connects via OAut
 
 ---
 
-## Add Mimir in Cursor (OAuth — recommended)
+## Choose The Right Auth Path
+
+| Setup | Recommended auth |
+|-------|------------------|
+| Cursor running locally with browser access | OAuth |
+| Cursor over SSH | API key |
+| Headless client | API key |
+| Remote development box | API key |
+| RPi5 workflow | API key |
+
+OAuth is optional. MCP setup does not require OAuth.
+
+---
+
+## Add Mimir in Cursor (OAuth — local/browser setups)
 
 1. Open **Cursor Settings** → **MCP** → **Add MCP Server**
 2. Choose **URL** as the transport type
@@ -26,6 +40,8 @@ Mimir exposes a Streamable HTTP MCP endpoint at `/mcp`. Cursor connects via OAut
 4. Click **Save**. Cursor will open your browser for OAuth authentication.
 5. Enter your Mimir API key in the browser → click **Authorize Access**.
 6. Cursor stores the token — future connections are automatic.
+
+If you use OAuth, `MIMIR_PUBLIC_URL` must be reachable from the machine running Cursor, not just from the server itself.
 
 ### LAN server
 
@@ -53,9 +69,9 @@ Mimir exposes a Streamable HTTP MCP endpoint at `/mcp`. Cursor connects via OAut
 
 ---
 
-## Manual Bearer Fallback
+## Add Mimir in Cursor (API key — SSH/remote/headless)
 
-If OAuth is unavailable, use a static API key directly:
+Use this for Cursor over SSH, remote development, headless environments, and RPi5 workflows:
 
 ```json
 {
@@ -71,8 +87,6 @@ If OAuth is unavailable, use a static API key directly:
 ```
 
 ---
-
-## Add Mimir in Cursor (legacy header mode)
 
 ---
 
@@ -127,8 +141,9 @@ curl -s -X POST http://192.168.1.246:8787/mcp \
 
 ## Auth Details
 
-- The endpoint accepts `Authorization: Bearer <key>` (standard Bearer token)
+- The endpoint accepts `Authorization: Bearer <key>` for both API keys and OAuth access tokens
 - Also accepts `X-API-Key: <key>` for backward compatibility
+- API-key Bearer auth is a first-class supported MCP path
 - In dev mode (`MIMIR_ENV=development`), auth is bypassed automatically
 - In prod mode (`MIMIR_AUTH_MODE=prod`), requests without a valid key return HTTP 401
 
@@ -136,7 +151,9 @@ curl -s -X POST http://192.168.1.246:8787/mcp \
 
 ## Troubleshooting
 
-**401 Unauthorized** — Key doesn't match `MIMIR_API_KEY` on the server. Check the env var on the machine running Mimir.
+**OAuth browser window never completes** — Check that `MIMIR_PUBLIC_URL` is reachable from the machine running Cursor. For SSH/headless setups, use API-key Bearer auth instead.
+
+**401 Unauthorized** — Key doesn't match a valid Mimir API key or OAuth token on the server. Check the credential on the machine running Cursor.
 
 **Connection refused** — Verify Mimir is running and the port is reachable (check Tailscale if remote).
 

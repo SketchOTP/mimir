@@ -1,5 +1,19 @@
 # Mimir Deployment Guide
 
+## Current Live Runtime
+
+Current live Atlas deployment uses the Postgres profile runtime:
+- `api-pg` is the container bound to port `8787`
+- the older `mimir-api-1` local/SQLite container is stopped
+
+This matters for debugging: if you are checking `http://localhost:8787`, you are talking to `api-pg`, not the old local `api` service.
+Confirm before debugging startup, auth, MCP, or retrieval issues:
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+docker compose --profile prod-postgres ps
+```
+
 ## Prerequisites
 
 - Python 3.11+
@@ -75,6 +89,8 @@ curl -H "X-API-Key: $MIMIR_API_KEY" http://localhost:8787/api/system/readiness
 
 Services: `postgres` + `api-pg` (port 8787) + `worker-pg` + `web-pg` (port 5173).  
 Data persists in volumes `mimir_data` (files) and `postgres_data` (DB).
+
+Note: only one service should own host port `8787` at a time. In the current live Atlas deployment that owner is `api-pg`.
 
 ### Connecting Postgres externally
 

@@ -2,6 +2,8 @@
 
 This guide is for users who clone Mimir from GitHub and want to run it as a remote MCP server for Cursor.
 
+Use OAuth for normal local/browser setups. Use API-key Bearer auth for SSH, headless, remote-development, and RPi5 Cursor workflows. MCP setup does not require OAuth.
+
 ## 1-Minute Setup (local, single user)
 
 ```bash
@@ -35,6 +37,21 @@ Add to Cursor:
 ```
 
 Open Cursor → authorize in browser → done.
+
+If Cursor is running over SSH or otherwise cannot complete a browser flow, use API-key Bearer auth instead:
+
+```json
+{
+  "mcpServers": {
+    "mimir": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -77,6 +94,8 @@ make dev     # API on :8787
 4. Cursor registers as a client and opens `/oauth/authorize` in your browser
 5. You enter your API key → Cursor gets an OAuth token
 6. Cursor stores the token — future connections are automatic
+
+If you use OAuth, `MIMIR_PUBLIC_URL` must be reachable from the machine running Cursor, not just from the Mimir host.
 
 ---
 

@@ -57,12 +57,14 @@ export default function Telemetry() {
   const [providerStats, setProviderStats] = useState<ProviderStat[]>([]);
   const [providerDrift, setProviderDrift] = useState<ProviderDrift[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [computing, setComputing] = useState(false);
   const [decaying, setDecaying] = useState(false);
   const [aggregating, setAggregating] = useState(false);
 
   const load = async () => {
     setLoading(true);
+    setError("");
     try {
       const [snap, st, hm, proc, dr, ps, pd] = await Promise.all([
         getTelemetrySnapshot(),
@@ -82,6 +84,14 @@ export default function Telemetry() {
       setProviderDrift(pd.data.drifting_providers || []);
     } catch (e) {
       console.error("Telemetry load failed", e);
+      setMetrics({});
+      setStats(null);
+      setHeatmap({ most_used: [], rarely_used: [] });
+      setProcedural([]);
+      setDrift([]);
+      setProviderStats([]);
+      setProviderDrift([]);
+      setError("Telemetry data could not be loaded. Showing empty defaults instead of crashing.");
     } finally {
       setLoading(false);
     }
@@ -136,6 +146,11 @@ export default function Telemetry() {
         <div className="p-8 text-slate-400 text-center">Loading telemetry…</div>
       ) : (
         <div className="p-6 space-y-8">
+          {error && (
+            <div className="rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+              {error}
+            </div>
+          )}
 
           {/* ── Cognitive Metrics ── */}
           <section>
@@ -243,7 +258,7 @@ export default function Telemetry() {
           </section>
 
           {/* ── P10: Provider Drift Alerts ── */}
-          {providerDrift.length > 0 && (
+            {providerDrift.length > 0 && (
             <section>
               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
                 <AlertTriangle size={14} className="text-red-400" /> Provider Drift ({providerDrift.length})
@@ -288,7 +303,7 @@ export default function Telemetry() {
                         <span className="text-slate-500 ml-2">× {m.times_retrieved} | success: {pct(m.success_rate)}</span>
                       </div>
                     ))}
-                    {heatmap.most_used.length === 0 && <p className="text-xs text-slate-500">No data yet</p>}
+                    {heatmap?.most_used?.length === 0 && <p className="text-xs text-slate-500">No data yet</p>}
                   </div>
                 </div>
                 <div>
@@ -301,7 +316,7 @@ export default function Telemetry() {
                         <span className="text-slate-500 ml-2">× {m.times_retrieved}</span>
                       </div>
                     ))}
-                    {heatmap.rarely_used.length === 0 && <p className="text-xs text-slate-500">No data yet</p>}
+                    {heatmap?.rarely_used?.length === 0 && <p className="text-xs text-slate-500">No data yet</p>}
                   </div>
                 </div>
               </div>

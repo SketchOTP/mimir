@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from memory.trust import MemoryState
 from storage.models import Memory
 
-_BLOCKED = list(MemoryState.BLOCKED)
 _ALL_CAPSULES = (
     "project_profile",
     "architecture_summary",
@@ -21,12 +20,17 @@ _ALL_CAPSULES = (
     "procedural_lesson",
     "governance_rules",
 )
+_BOOTSTRAP_LAYERS = ("semantic", "episodic", "procedural")
 
 
 def capsule_type(meta: dict[str, Any] | None) -> str | None:
     if not isinstance(meta, dict):
         return None
     return meta.get("capsule_type") or meta.get("bootstrap_type")
+
+
+def is_bootstrap_memory(meta: dict[str, Any] | None) -> bool:
+    return isinstance(meta, dict) and meta.get("bootstrap") is True and capsule_type(meta) in _ALL_CAPSULES
 
 
 def normalize_query(query: str) -> str:
@@ -105,24 +109,49 @@ async def load_bootstrap_capsules(
     user_id: str | None = None,
     limit: int = 10,
 ) -> list[Memory]:
-    if not project:
-        return []
+    rows, _ = await lookup_bootstrap_capsules(
+        session,
+        project=project,
+        query=query,
+        user_id=user_id,
+        limit=limit,
+    )
+    return rows
 
+
+async def lookup_bootstrap_capsules(
+    session: AsyncSession,
+    *,
+    project: str | None,
+    query: str,
+    user_id: str | None = None,
+    limit: int = 10,
+) -> tuple[list[Memory], dict[str, Any]]:
     wanted = target_capsules(query)
-    if not wanted:
-        return []
+    debug = {
+        "found_bootstrap_capsule_types": [],
+        "missing_bootstrap_capsule_types": wanted.copy(),
+        "user_id": user_id,
+        "project": project,
+        "layers_searched": list(_BOOTSTRAP_LAYERS),
+        "fallback_used": False,
+    }
+    if not project or not wanted:
+        return [], debug
+
+    debug["fallback_used"] = True
 
     base = (
         select(Memory)
         .where(
             Memory.project == project,
             Memory.deleted_at.is_(None),
-            Memory.memory_state.notin_(_BLOCKED),
+            Memory.memory_state == MemoryState.ACTIVE,
             Memory.source_type == "project_bootstrap",
         )
     )
     if user_id:
-        base = base.where(or_(Memory.user_id == user_id, Memory.user_id.is_(None)))
+        base = base.where(Memory.user_id == user_id)
 
     rows: list[Memory] = []
     try:
@@ -142,10 +171,13 @@ async def load_bootstrap_capsules(
     filtered = [
         mem
         for mem in rows
-        if isinstance(mem.meta, dict)
-        and mem.meta.get("bootstrap") is True
+        if is_bootstrap_memory(mem.meta)
         and capsule_type(mem.meta) in wanted
     ]
+
+    found = [capsule_type(mem.meta) for mem in filtered if capsule_type(mem.meta)]
+    debug["found_bootstrap_capsule_types"] = found
+    debug["missing_bootstrap_capsule_types"] = [name for name in wanted if name not in found]
 
     order = {name: i for i, name in enumerate(wanted)}
     filtered.sort(
@@ -159,4 +191,4 @@ async def load_bootstrap_capsules(
             ),
         )
     )
-    return filtered[:limit]
+    return filtered[:limit], debug

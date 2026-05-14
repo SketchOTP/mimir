@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,17 @@ def _tool_payload(resp) -> dict:
 
 async def _post(client: AsyncClient, method: str, params: dict | None = None) -> dict:
     r = await client.post("/mcp", json=_rpc(method, params), headers=_BEARER)
+    assert r.status_code == 200, r.text
+    return r
+
+
+async def _post_with_headers(
+    client: AsyncClient,
+    headers: dict[str, str],
+    method: str,
+    params: dict | None = None,
+):
+    r = await client.post("/mcp", json=_rpc(method, params), headers=headers)
     assert r.status_code == 200, r.text
     return r
 
@@ -244,3 +258,103 @@ async def test_postgres_bootstrap_wrong_project_isolated(pg_client):
         "arguments": {"project": "wrong-project", "query": "what is this project?", "min_score": 0.0},
     }))
     assert recall["hits"] == []
+
+
+@pytest.mark.asyncio
+async def test_postgres_bootstrap_mcp_route_is_user_scoped(pg_client):
+    from mimir.config import get_settings
+    from storage.database import get_session_factory
+    from storage.models import APIKey, Memory, User
+
+    user_a = uuid.uuid4().hex
+    user_b = uuid.uuid4().hex
+    key_a = secrets.token_urlsafe(24)
+    key_b = secrets.token_urlsafe(24)
+    project = "auto"
+
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add_all([
+            User(id=user_a, email=f"{user_a[:8]}@test.com", display_name="User A"),
+            User(id=user_b, email=f"{user_b[:8]}@test.com", display_name="User B"),
+            APIKey(
+                id=uuid.uuid4().hex,
+                user_id=user_a,
+                key_hash=hashlib.sha256(key_a.encode()).hexdigest(),
+                name="user-a",
+            ),
+            APIKey(
+                id=uuid.uuid4().hex,
+                user_id=user_b,
+                key_hash=hashlib.sha256(key_b.encode()).hexdigest(),
+                name="user-b",
+            ),
+        ])
+        await session.commit()
+
+    settings = get_settings()
+    original_mode = settings.auth_mode
+    object.__setattr__(settings, "auth_mode", "prod")
+    try:
+        headers_a = {
+            "Authorization": f"Bearer {key_a}",
+            "Accept": "application/json, text/event-stream",
+        }
+        headers_b = {
+            "Authorization": f"Bearer {key_b}",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        bootstrap = _tool_payload(await _post_with_headers(pg_client, headers_a, "tools/call", {
+            "name": "project_bootstrap",
+            "arguments": _bootstrap_args(project),
+        }))
+        assert bootstrap["ok"] is True
+
+        async with factory() as session:
+            result = await session.execute(
+                select(Memory).where(
+                    Memory.project == project,
+                    Memory.user_id == user_a,
+                    Memory.deleted_at.is_(None),
+                )
+            )
+            memories = list(result.scalars())
+
+        assert len(memories) == 7
+        assert {mem.layer for mem in memories} == {"semantic", "episodic", "procedural"}
+        assert all(mem.user_id == user_a for mem in memories)
+
+        search_a = _tool_payload(await _post_with_headers(pg_client, headers_a, "tools/call", {
+            "name": "memory_search",
+            "arguments": {"project": project, "query": "architecture_summary", "min_score": 0.0},
+        }))
+        assert any(m.get("capsule_type") == "architecture_summary" for m in search_a["memories"])
+        assert any(m["id"].startswith("sm_") for m in search_a["memories"])
+
+        recall_a = _tool_payload(await _post_with_headers(pg_client, headers_a, "tools/call", {
+            "name": "memory_recall",
+            "arguments": {"project": project, "query": "what is this project?", "min_score": 0.0},
+        }))
+        recall_capsules = {hit.get("capsule_type") for hit in recall_a["hits"]}
+        recall_ids = {hit["id"] for hit in recall_a["hits"]}
+        assert {"project_profile", "architecture_summary", "active_status"}.issubset(recall_capsules)
+        assert any(memory_id.startswith("sm_") for memory_id in recall_ids)
+        assert any(memory_id.startswith("pr_") for memory_id in recall_ids)
+        assert recall_a["fallback_used"] is True
+        assert recall_a["user_id"] == user_a
+
+        search_b = _tool_payload(await _post_with_headers(pg_client, headers_b, "tools/call", {
+            "name": "memory_search",
+            "arguments": {"project": project, "query": "project_profile", "min_score": 0.0},
+        }))
+        assert search_b["memories"] == []
+
+        recall_b = _tool_payload(await _post_with_headers(pg_client, headers_b, "tools/call", {
+            "name": "memory_recall",
+            "arguments": {"project": project, "query": "what is this project?", "min_score": 0.0},
+        }))
+        assert recall_b["hits"] == []
+        assert recall_b["found_bootstrap_capsule_types"] == []
+    finally:
+        object.__setattr__(settings, "auth_mode", original_mode)

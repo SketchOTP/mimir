@@ -26,6 +26,7 @@ async def store(
     content: str,
     *,
     project: str | None = None,
+    user_id: str | None = None,
     importance: float = 0.8,
     meta: dict | None = None,
     # Trust / provenance
@@ -61,6 +62,7 @@ async def store(
         layer=LAYER,
         content=content,
         project=project,
+        user_id=user_id,
         importance=importance,
         meta=meta,
         # Temporal
@@ -69,7 +71,7 @@ async def store(
         # Trust
         trust_score=t_score,
         source_type=source_type,
-        created_by=created_by,
+        created_by=created_by or user_id,
         verification_status=v_status,
         confidence=conf,
         poisoning_flags=poisoning_flags,
@@ -82,6 +84,7 @@ async def store(
     await session.commit()
     vector_store.upsert(
         LAYER, mem_id, content,
+        user_id=user_id,
         project_id=project,
         importance=importance,
         created_at=mem.created_at.isoformat() if mem.created_at else None,
@@ -134,6 +137,7 @@ async def update(session: AsyncSession, memory_id: str, content: str) -> Memory 
     await session.commit()
     vector_store.upsert(
         LAYER, memory_id, content,
+        user_id=mem.user_id,
         project_id=mem.project,
         importance=mem.importance,
         trust_score=mem.trust_score or 0.7,

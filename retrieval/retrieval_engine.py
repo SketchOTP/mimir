@@ -13,7 +13,8 @@ from memory.trust import MemoryState
 from retrieval.bootstrap_capsules import (
     capsule_query_score,
     capsule_type,
-    load_bootstrap_capsules,
+    is_bootstrap_memory,
+    lookup_bootstrap_capsules,
 )
 from retrieval.providers import keyword_provider
 from storage.models import Memory, RetrievalLog
@@ -54,7 +55,7 @@ async def search(
 
     candidates: dict[str, dict[str, Any]] = {}
 
-    bootstrap_hits = await load_bootstrap_capsules(
+    bootstrap_hits, _ = await lookup_bootstrap_capsules(
         session,
         project=project,
         query=query,
@@ -82,6 +83,8 @@ async def search(
         )
         for hit in vector_hits:
             mem = hit["memory"]
+            if user_id and is_bootstrap_memory(mem.meta) and mem.user_id != user_id:
+                continue
             mem_id = mem.id
             score = float(hit["score"])
             row = candidates.get(mem_id)
@@ -122,6 +125,8 @@ async def search(
 
         result = await session.execute(q)
         for mem in result.scalars():
+            if user_id and is_bootstrap_memory(mem.meta) and mem.user_id != user_id:
+                continue
             candidates[mem.id] = {
                 "memory": mem,
                 "layer": mem.layer,

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 
@@ -30,6 +31,7 @@ from mimir.config import get_settings
 from storage.database import get_session_factory
 
 router = APIRouter(tags=["mcp"])
+logger = logging.getLogger(__name__)
 
 # Protocol version this server advertises
 _MCP_VERSION = "2024-11-05"
@@ -244,6 +246,7 @@ async def _run_memory_recall_tool(
     token_budget: int | None,
 ) -> dict[str, Any]:
     from context.context_builder import build as build_context
+    from retrieval.bootstrap_capsules import lookup_bootstrap_capsules
     from retrieval.retrieval_engine import search as retrieval_search
 
     hits = await retrieval_search(
@@ -255,6 +258,15 @@ async def _run_memory_recall_tool(
         limit=limit,
         min_score=min_score,
     )
+    _, bootstrap_debug = await lookup_bootstrap_capsules(
+        session,
+        project=project,
+        query=query,
+        user_id=user_id,
+        limit=limit,
+    )
+    if bootstrap_debug["fallback_used"]:
+        logger.info("mcp memory_recall bootstrap_debug=%s", bootstrap_debug)
     if token_budget:
         ctx = await build_context(
             session,
@@ -265,8 +277,13 @@ async def _run_memory_recall_tool(
             user_id=user_id,
         )
         ctx["hits"] = hits
+        if bootstrap_debug["fallback_used"]:
+            ctx.update(bootstrap_debug)
         return ctx
-    return {"hits": hits}
+    payload = {"hits": hits}
+    if bootstrap_debug["fallback_used"]:
+        payload.update(bootstrap_debug)
+    return payload
 
 
 async def _run_memory_search_tool(
@@ -279,6 +296,7 @@ async def _run_memory_search_tool(
     limit: int,
     min_score: float,
 ) -> dict[str, Any]:
+    from retrieval.bootstrap_capsules import lookup_bootstrap_capsules
     from retrieval.retrieval_engine import search as retrieval_search
 
     hits = await retrieval_search(
@@ -290,7 +308,19 @@ async def _run_memory_search_tool(
         limit=limit,
         min_score=min_score,
     )
-    return {"memories": hits}
+    _, bootstrap_debug = await lookup_bootstrap_capsules(
+        session,
+        project=project,
+        query=query,
+        user_id=user_id,
+        limit=limit,
+    )
+    if bootstrap_debug["fallback_used"]:
+        logger.info("mcp memory_search bootstrap_debug=%s", bootstrap_debug)
+    payload = {"memories": hits}
+    if bootstrap_debug["fallback_used"]:
+        payload.update(bootstrap_debug)
+    return payload
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -686,6 +716,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     select(_Memory).where(
                         _Memory.project == project,
                         _Memory.deleted_at.is_(None),
+                        _Memory.user_id == uid,
                     ).limit(400)
                 )
                 bootstrap_existing = [
@@ -751,6 +782,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     existing = (by_type.get(btype) or [None])[0]
                     if existing and force:
                         existing.project = project
+                        existing.user_id = uid
                         existing.meta = meta
                         existing.source_type = _trust_kwargs["source_type"]
                         existing.memory_state = "active"
@@ -788,6 +820,7 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                         else:
                             mem = await procedural_store.store(
                                 session, content, project=project,
+                                user_id=uid,
                                 importance=importance, meta=meta,
                                 **_trust_kwargs,
                             )

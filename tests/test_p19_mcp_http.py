@@ -16,7 +16,10 @@ Tests:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +42,17 @@ def _rpc(method: str, params: dict | None = None, req_id: int | None = 1) -> dic
 
 async def _post(client: AsyncClient, method: str, params: dict | None = None) -> dict:
     r = await client.post("/mcp", json=_rpc(method, params), headers=_BEARER)
+    assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
+    return r
+
+
+async def _post_with_headers(
+    client: AsyncClient,
+    headers: dict[str, str],
+    method: str,
+    params: dict | None = None,
+):
+    r = await client.post("/mcp", json=_rpc(method, params), headers=headers)
     assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
     return r
 
@@ -632,6 +646,41 @@ async def test_mcp_bootstrap_recall_identity_testing_and_safety_queries(client):
 
 
 @pytest.mark.asyncio
+async def test_mcp_bootstrap_recall_includes_debug_and_all_layers(client):
+    """Bootstrap recall exposes fallback debug fields and returns semantic+procedural ids."""
+    project = f"auto_debug_{uuid.uuid4().hex[:8]}"
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": project,
+            "repo_path": "/home/sketch/auto",
+            "profile": "Auto profile for debug recall test.",
+            "architecture": "Auto architecture for debug recall test.",
+            "status": "Auto status for debug recall test.",
+            "constraints": "Auto constraints for debug recall test.",
+            "testing": "Auto testing protocol for debug recall test.",
+            "knowledge": "Auto procedural lessons for debug recall test.",
+            "force": True,
+        },
+    }))
+
+    payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "what is this project?", "min_score": 0.0},
+    }))
+    capsule_types = {hit.get("capsule_type") for hit in payload["hits"]}
+    ids = {hit["id"] for hit in payload["hits"]}
+
+    assert payload["fallback_used"] is True
+    assert payload["project"] == project
+    assert payload["layers_searched"] == ["semantic", "episodic", "procedural"]
+    assert {"project_profile", "architecture_summary", "active_status"}.issubset(capsule_types)
+    assert "project_profile" in payload["found_bootstrap_capsule_types"]
+    assert any(memory_id.startswith("sm_") for memory_id in ids)
+    assert any(memory_id.startswith("pr_") for memory_id in ids)
+
+
+@pytest.mark.asyncio
 async def test_mcp_bootstrap_wrong_project_recall_isolated(client):
     """Wrong project slug does not return auto bootstrap capsules on recall."""
     _tool_payload(await _post(client, "tools/call", {
@@ -654,6 +703,106 @@ async def test_mcp_bootstrap_wrong_project_recall_isolated(client):
         "arguments": {"project": "wrong_project_slug", "query": "what is this project?"},
     }))
     assert payload["hits"] == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_prod_api_key_user_isolation(client):
+    """Prod-mode MCP bootstrap retrieval is isolated per API-key user."""
+    from mimir.config import get_settings
+    from storage.database import get_session_factory
+    from storage.models import APIKey, User
+
+    user_a = uuid.uuid4().hex
+    user_b = uuid.uuid4().hex
+    key_a = secrets.token_urlsafe(24)
+    key_b = secrets.token_urlsafe(24)
+    project = f"auto_auth_{uuid.uuid4().hex[:8]}"
+
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add_all([
+            User(id=user_a, email=f"{user_a[:8]}@test.com", display_name="User A"),
+            User(id=user_b, email=f"{user_b[:8]}@test.com", display_name="User B"),
+            APIKey(
+                id=uuid.uuid4().hex,
+                user_id=user_a,
+                key_hash=hashlib.sha256(key_a.encode()).hexdigest(),
+                name="user-a",
+            ),
+            APIKey(
+                id=uuid.uuid4().hex,
+                user_id=user_b,
+                key_hash=hashlib.sha256(key_b.encode()).hexdigest(),
+                name="user-b",
+            ),
+        ])
+        await session.commit()
+
+    settings = get_settings()
+    original_mode = settings.auth_mode
+    object.__setattr__(settings, "auth_mode", "prod")
+    try:
+        headers_a = {
+            "Authorization": f"Bearer {key_a}",
+            "Accept": "application/json, text/event-stream",
+        }
+        headers_b = {
+            "Authorization": f"Bearer {key_b}",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        bootstrap = _tool_payload(await _post_with_headers(client, headers_a, "tools/call", {
+            "name": "project_bootstrap",
+            "arguments": {
+                "project": project,
+                "repo_path": "/home/sketch/auto",
+                "profile": "Project profile owned by user A.",
+                "architecture": "Architecture summary owned by user A.",
+                "status": "Active status owned by user A.",
+                "constraints": "Safety constraints owned by user A.",
+                "testing": "Testing protocol owned by user A.",
+                "knowledge": "Procedural lessons owned by user A.",
+                "force": True,
+            },
+        }))
+        assert bootstrap["ok"] is True
+
+        search_a = _tool_payload(await _post_with_headers(client, headers_a, "tools/call", {
+            "name": "memory_search",
+            "arguments": {"project": project, "query": "project_profile", "min_score": 0.0},
+        }))
+        assert any(m.get("capsule_type") == "project_profile" for m in search_a["memories"])
+        assert search_a["user_id"] == user_a
+
+        recall_a = _tool_payload(await _post_with_headers(client, headers_a, "tools/call", {
+            "name": "memory_recall",
+            "arguments": {"project": project, "query": "what is this project?", "min_score": 0.0},
+        }))
+        recall_capsules = {hit.get("capsule_type") for hit in recall_a["hits"]}
+        recall_ids = {hit["id"] for hit in recall_a["hits"]}
+        assert recall_a["fallback_used"] is True
+        assert recall_a["user_id"] == user_a
+        assert {"project_profile", "architecture_summary", "active_status"}.issubset(recall_capsules)
+        assert any(memory_id.startswith("sm_") for memory_id in recall_ids)
+        assert any(memory_id.startswith("pr_") for memory_id in recall_ids)
+
+        search_b = _tool_payload(await _post_with_headers(client, headers_b, "tools/call", {
+            "name": "memory_search",
+            "arguments": {"project": project, "query": "project_profile", "min_score": 0.0},
+        }))
+        assert search_b["memories"] == []
+        assert search_b["user_id"] == user_b
+
+        recall_b = _tool_payload(await _post_with_headers(client, headers_b, "tools/call", {
+            "name": "memory_recall",
+            "arguments": {"project": project, "query": "what is this project?", "min_score": 0.0},
+        }))
+        assert recall_b["hits"] == []
+        assert recall_b["found_bootstrap_capsule_types"] == []
+        assert "project_profile" in recall_b["missing_bootstrap_capsule_types"]
+        assert recall_b["user_id"] == user_b
+    finally:
+        object.__setattr__(settings, "auth_mode", original_mode)
 
 
 # ── P19-11: dotted legacy aliases are accepted but not advertised ─────────────

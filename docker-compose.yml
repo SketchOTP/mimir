@@ -1,16 +1,22 @@
 version: "3.9"
 
-# Profiles:
-#   local         — SQLite single-user local deployment (OAuth enabled, single_user mode)
-#   prod-postgres — Postgres-backed multi-user production deployment (multi_user mode)
-#
-# Usage:
-#   docker compose --profile local up --build           # SQLite + single_user auth
-#   docker compose --profile prod-postgres up --build   # Postgres + multi_user auth
-#
-# After starting, create the owner account:
-#   docker compose exec api python -m mimir.auth.create_owner \
-#     --email you@example.com --display-name "Your Name"
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Mimir — Docker Compose                                         ║
+# ╠══════════════════════════════════════════════════════════════════╣
+# ║  Quick start (local single-user, recommended):                  ║
+# ║    docker compose up -d                                         ║
+# ║    # then open: http://127.0.0.1:5173                           ║
+# ║                                                                  ║
+# ║  LAN server (accessible from Cursor on another machine):        ║
+# ║    ./scripts/start_lan.sh                                        ║
+# ║                                                                  ║
+# ║  Profiles:                                                       ║
+# ║    (default / no profile)  SQLite + single_user auth            ║
+# ║    local                   same as default (explicit)           ║
+# ║    prod-postgres            Postgres + multi_user auth          ║
+# ║                                                                  ║
+# ║  Health check:  ./scripts/doctor.sh                             ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
 services:
   # ──────────────────────────────────────────────────────────────────────────

@@ -123,6 +123,29 @@ const normalizeImprovements = (value: unknown) => {
 const normalizePlans = (value: unknown) => asArray<any>(value);
 const normalizeHistory = (value: unknown) => asArray<any>(value);
 const normalizeCounterfactuals = (value: unknown) => asArray<any>(value);
+const normalizeConnectionOnboarding = (value: unknown) => {
+  const raw = asObject(value, {} as Record<string, unknown>);
+  const urls = asObject(raw.urls, {} as Record<string, unknown>);
+  const generated = asObject(raw.generated, {} as Record<string, unknown>);
+  return {
+    auth_mode: typeof raw.auth_mode === "string" ? raw.auth_mode : "unknown",
+    oauth_enabled: Boolean(raw.oauth_enabled),
+    owner_exists: Boolean(raw.owner_exists),
+    recommended_auth: typeof raw.recommended_auth === "string" ? raw.recommended_auth : "oauth",
+    urls: {
+      dashboard: typeof urls.dashboard === "string" ? urls.dashboard : "/",
+      connection_settings: typeof urls.connection_settings === "string" ? urls.connection_settings : "/settings/connection",
+      first_run_setup: typeof urls.first_run_setup === "string" ? urls.first_run_setup : "/setup",
+      oauth_authorize: typeof urls.oauth_authorize === "string" ? urls.oauth_authorize : "/oauth/authorize",
+      mcp_url: typeof urls.mcp_url === "string" ? urls.mcp_url : "/mcp",
+    },
+    generated: {
+      oauth_local: typeof generated.oauth_local === "string" ? generated.oauth_local : "",
+      api_key_remote: typeof generated.api_key_remote === "string" ? generated.api_key_remote : "",
+    },
+    warnings: asArray<{ code: string; message: string; severity: string }>(raw.warnings),
+  };
+};
 
 // ─── Memory ──────────────────────────────────────────────────────────────────
 export const listMemories = async (params?: object) =>
@@ -166,6 +189,8 @@ export const rejectRequest = (id: string, note?: string) =>
 export const getDashboard = async () =>
   getNormalized("/dashboard", normalizeDashboard);
 export const getHealth = () => api.get("/health");
+export const getConnectionOnboarding = async () =>
+  getNormalized("/connection/onboarding", normalizeConnectionOnboarding);
 
 // ─── Notifications ───────────────────────────────────────────────────────────
 export const listNotifications = async (params?: object) =>
@@ -223,5 +248,14 @@ export const getCalibrationHistory = async (params?: object) =>
   getNormalized("/simulation/calibration/history", normalizeHistory, { params: params || {} });
 export const recordSimOutcome = (runId: string, actual_outcome: string) =>
   api.post(`/simulation/simulations/${runId}/outcome`, { actual_outcome });
+
+// Projects API
+export const getProjects = () =>
+  axios.get("/api/projects", { headers: { "X-API-Key": "local-dev-key" } });
+export const getProject = (slug: string) =>
+  axios.get(`/api/projects/${encodeURIComponent(slug)}`, { headers: { "X-API-Key": "local-dev-key" } });
+
+// Doctor (unauthenticated)
+export const getDoctor = () => axios.get("/api/system/doctor");
 
 export default api;

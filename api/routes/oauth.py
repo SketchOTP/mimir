@@ -39,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mimir.config import get_settings
+from mimir.setup_profile import build_mcp_config, effective_public_url, load_setup_profile, normalize_setup_profile, recommended_auth, save_setup_profile
 from storage.database import get_session, get_session_factory
 from storage.models import APIKey, OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken, OAuthToken, User
 
@@ -56,10 +57,8 @@ def _hash(value: str) -> str:
 
 def _public_url(request: Request) -> str:
     """Derive the public base URL, falling back to the request origin."""
-    settings = get_settings()
-    if settings.public_url:
-        return settings.public_url.rstrip("/")
-    return f"{request.url.scheme}://{request.url.netloc}"
+    request_base = f"{request.url.scheme}://{request.url.netloc}"
+    return effective_public_url(request_base)
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str, method: str = "S256") -> bool:
@@ -76,6 +75,28 @@ def _require_oauth(request: Request) -> None:
     settings = get_settings()
     if not settings.oauth_enabled:
         raise HTTPException(status_code=404, detail="OAuth not enabled")
+
+
+def _escape_attr(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _escape_html(value: str) -> str:
+    return _escape_attr(value).replace("'", "&#39;")
+
+
+def _auth_mode_label() -> str:
+    settings = get_settings()
+    if settings.is_single_user:
+        return "single_user"
+    if settings.is_multi_user:
+        return "multi_user"
+    return "dev"
 
 
 # ── Well-known discovery ──────────────────────────────────────────────────────
@@ -167,14 +188,23 @@ async def register_client(
 
 # ── Authorize form helpers ────────────────────────────────────────────────────
 
-def _authorize_form(error: str = "", params: dict | None = None) -> str:
-    """Minimal HTML authorize page."""
+def _authorize_form(
+    error: str = "",
+    params: dict | None = None,
+    *,
+    api_key_value: str = "",
+    info: str = "",
+) -> str:
     params_hidden = ""
     if params:
         for k, v in params.items():
-            params_hidden += f'<input type="hidden" name="{k}" value="{v}">\n'
+            params_hidden += f'<input type="hidden" name="{k}" value="{_escape_attr(v)}">\n'
 
     error_html = f'<p class="error">{error}</p>' if error else ""
+    info_html = f'<p class="info">{info}</p>' if info else ""
+    mode = _auth_mode_label()
+    profile = normalize_setup_profile(load_setup_profile())
+    profile_html = _connection_summary_html(profile, api_key="YOUR_API_KEY")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -185,35 +215,185 @@ def _authorize_form(error: str = "", params: dict | None = None) -> str:
   body {{ font-family: system-ui, sans-serif; background: #0f1117; color: #e2e8f0;
           display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
   .card {{ background: #1a1d2e; border: 1px solid #2d3748; border-radius: 12px;
-           padding: 2rem; max-width: 400px; width: 100%; }}
+           padding: 2rem; max-width: 520px; width: 100%; }}
   h1 {{ font-size: 1.4rem; margin: 0 0 0.5rem; color: #a78bfa; }}
-  p {{ color: #94a3b8; margin: 0.5rem 0 1.5rem; font-size: 0.9rem; }}
+  p {{ color: #94a3b8; margin: 0.5rem 0 1rem; font-size: 0.9rem; }}
   label {{ display: block; margin-bottom: 0.5rem; font-size: 0.85rem; color: #94a3b8; }}
-  input[type=password], input[type=email] {{
+  input[type=password], input[type=email], input[type=text] {{
     width: 100%; padding: 0.6rem 0.8rem; border-radius: 8px;
     border: 1px solid #2d3748; background: #0f1117; color: #e2e8f0;
     font-size: 0.9rem; box-sizing: border-box; margin-bottom: 1rem;
   }}
+  .mode {{ display: inline-block; margin-bottom: 1rem; padding: 0.25rem 0.55rem; border-radius: 999px;
+           background: #0f172a; border: 1px solid #334155; color: #cbd5e1; font-size: 0.78rem; }}
+  .panel {{ background: #111827; border: 1px solid #374151; border-radius: 10px; padding: 0.9rem 1rem; margin: 1rem 0; }}
+  .panel strong {{ color: #e2e8f0; }}
+  .muted {{ color: #94a3b8; font-size: 0.85rem; }}
+  .actions {{ display: flex; gap: 0.75rem; margin-top: 0.9rem; }}
+  .actions a {{ flex: 1; text-align: center; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; text-decoration: none; padding: 0.6rem 0.8rem; font-size: 0.85rem; }}
+  .actions a:hover {{ border-color: #64748b; }}
   button {{ width: 100%; padding: 0.7rem; border-radius: 8px; border: none;
             background: #7c3aed; color: white; font-size: 1rem; cursor: pointer; }}
   button:hover {{ background: #6d28d9; }}
   .error {{ color: #f87171; font-size: 0.85rem; margin-bottom: 1rem; }}
+  .info {{ color: #93c5fd; font-size: 0.85rem; margin-bottom: 1rem; }}
+  code {{ background: #0f1117; padding: .1rem .35rem; border-radius: 4px; }}
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>🧠 Mimir</h1>
-  <p>An application is requesting access to your Mimir memory. Enter your API key to authorize.</p>
+  <h1>Mimir Access</h1>
+  <div class="mode">Mode: {mode}</div>
+  <p>This browser step authorizes Cursor to access this Mimir server.</p>
+  <div class="panel">
+    <strong>Which path should I use?</strong>
+    <p class="muted">Browser-capable local Cursor can finish OAuth here. SSH, headless, and remote workflows can skip this page and connect with <code>Authorization: Bearer YOUR_API_KEY</code> directly.</p>
+    <div class="actions">
+      <a href="/">Open Dashboard</a>
+      <a href="/settings/connection">Connection Setup</a>
+    </div>
+  </div>
+  {profile_html}
   {error_html}
-  <form method="POST">
+  {info_html}
+  <form id="authorize-form" method="POST">
     {params_hidden}
     <label for="api_key">Your Mimir API Key</label>
-    <input type="password" id="api_key" name="api_key" placeholder="paste your API key" required autocomplete="current-password">
+    <input type="password" id="api_key" name="api_key" placeholder="paste your API key" value="{_escape_attr(api_key_value)}" required autocomplete="current-password">
     <button type="submit">Authorize Access</button>
   </form>
 </div>
+<script>
+(() => {{
+  const form = document.getElementById("authorize-form");
+  if (!form) return;
+  form.addEventListener("submit", () => {{
+    try {{
+      window.open("/", "_blank", "noopener");
+    }} catch (_err) {{
+      // noop
+    }}
+  }});
+}})();
+</script>
 </body>
 </html>"""
+
+
+def _single_user_setup_form(error: str = "", email: str = "", display_name: str = "", params: dict | None = None) -> str:
+    params_hidden = ""
+    if params:
+        for k, v in params.items():
+            params_hidden += f'<input type="hidden" name="{k}" value="{_escape_attr(v)}">\n'
+    error_html = f'<p class="error">{error}</p>' if error else ""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Mimir — First-Time Setup</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}
+.card{{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:2rem;max-width:560px;width:100%}}
+h1{{color:#a78bfa;margin-top:0}} p{{color:#94a3b8}} code{{background:#0f1117;padding:.2rem .5rem;border-radius:4px;font-size:.9rem}}
+label{{display:block;margin-bottom:.5rem;font-size:.85rem;color:#94a3b8}}
+input{{width:100%;padding:.6rem .8rem;border-radius:8px;border:1px solid #2d3748;background:#0f1117;color:#e2e8f0;font-size:.9rem;box-sizing:border-box;margin-bottom:1rem}}
+button{{width:100%;padding:.7rem;border-radius:8px;border:none;background:#7c3aed;color:white;font-size:1rem;cursor:pointer}}
+.error{{color:#f87171;font-size:.85rem;margin-bottom:1rem}}
+.mode{{display:inline-block;margin-bottom:1rem;padding:.25rem .55rem;border-radius:999px;background:#0f172a;border:1px solid #334155;color:#cbd5e1;font-size:.78rem}}
+.panel{{background:#111827;border:1px solid #374151;border-radius:10px;padding:.9rem 1rem;margin:1rem 0}}
+.muted{{color:#94a3b8;font-size:.85rem}}
+</style></head>
+<body><div class="card">
+<h1>Mimir First-Time Setup</h1>
+<div class="mode">Mode: single_user</div>
+<p>No owner account exists yet. This is a personal server, so you can create it right here.</p>
+<div class="panel">
+<strong>What happens next?</strong>
+<p class="muted">Mimir will create your owner account, generate your first API key, show it once, and then let you finish Cursor authorization without leaving this page.</p>
+</div>
+{error_html}
+<form method="POST">
+{params_hidden}
+<input type="hidden" name="setup_action" value="create_owner">
+<label for="email">Email</label>
+<input type="email" id="email" name="email" value="{_escape_attr(email)}" placeholder="you@example.com" required autocomplete="email">
+<label for="display_name">Display name</label>
+<input type="text" id="display_name" name="display_name" value="{_escape_attr(display_name)}" placeholder="Your Name" required autocomplete="name">
+<button type="submit">Create Owner And Continue</button>
+</form>
+</div></body></html>"""
+
+
+def _owner_created_page(raw_key: str, params: dict, email: str, display_name: str) -> str:
+    profile = normalize_setup_profile(load_setup_profile())
+    use_case = profile.get("use_case") or "local_browser"
+    public_url = profile.get("public_url") or "http://127.0.0.1:8787"
+    ssh_host = profile.get("ssh_host") or ""
+    remote_mimir_path = profile.get("remote_mimir_path") or ""
+    cursor_mcp_path = profile.get("cursor_mcp_path") or ""
+    remote_python_path = profile.get("remote_python_path") or ""
+    notes = profile.get("notes") or ""
+    params_hidden = ""
+    for k, v in params.items():
+        params_hidden += f'<input type="hidden" name="{k}" value="{_escape_attr(v)}">\n'
+    snippet = _escape_html(build_mcp_config({**profile, "public_url": public_url}, api_key=raw_key))
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Mimir — Owner Created</title>
+<style>
+body{{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}}
+.card{{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:2rem;max-width:560px;width:100%}}
+h1{{color:#a78bfa;margin-top:0}} p{{color:#94a3b8}} code{{background:#0f1117;padding:.2rem .5rem;border-radius:4px;font-size:.9rem}}
+textarea{{width:100%;min-height:96px;padding:.8rem;border-radius:8px;border:1px solid #2d3748;background:#0f1117;color:#e2e8f0;box-sizing:border-box;font-size:.92rem}}
+button{{width:100%;padding:.7rem;border-radius:8px;border:none;background:#7c3aed;color:white;font-size:1rem;cursor:pointer;margin-top:1rem}}
+.mode{{display:inline-block;margin-bottom:1rem;padding:.25rem .55rem;border-radius:999px;background:#0f172a;border:1px solid #334155;color:#cbd5e1;font-size:.78rem}}
+.panel{{background:#111827;border:1px solid #374151;border-radius:10px;padding:.9rem 1rem;margin:1rem 0}}
+.muted{{color:#94a3b8;font-size:.85rem}}
+label{{display:block;margin:.85rem 0 .5rem;font-size:.85rem;color:#94a3b8}}
+input,select{{width:100%;padding:.6rem .8rem;border-radius:8px;border:1px solid #2d3748;background:#0f1117;color:#e2e8f0;font-size:.9rem;box-sizing:border-box}}
+pre{{background:#0f1117;padding:.8rem;border-radius:8px;overflow:auto;color:#cbd5e1;font-size:.82rem}}
+</style></head>
+<body><div class="card">
+<h1>Owner Created</h1>
+<div class="mode">Mode: single_user</div>
+<p><strong>{_escape_html(display_name)}</strong> was created as the owner for <strong>{_escape_html(email)}</strong>.</p>
+<div class="panel">
+<strong>Your API key</strong>
+<p class="muted">This is the only time Mimir will show this key. Keep it for SSH, headless, or direct Bearer-auth setups.</p>
+<textarea readonly>{_escape_html(raw_key)}</textarea>
+</div>
+<form method="POST">
+{params_hidden}
+<input type="hidden" name="setup_action" value="save_profile_and_authorize">
+<input type="hidden" name="api_key" value="{_escape_attr(raw_key)}">
+<label for="use_case">Connection type</label>
+<select id="use_case" name="use_case">
+  <option value="local_browser"{" selected" if use_case == "local_browser" else ""}>Local Cursor with browser</option>
+  <option value="lan_browser"{" selected" if use_case == "lan_browser" else ""}>LAN browser access</option>
+  <option value="ssh_remote"{" selected" if use_case == "ssh_remote" else ""}>Cursor over SSH</option>
+  <option value="remote_dev"{" selected" if use_case == "remote_dev" else ""}>Remote development box</option>
+  <option value="headless"{" selected" if use_case == "headless" else ""}>Headless client</option>
+  <option value="rpi5"{" selected" if use_case == "rpi5" else ""}>RPi5 workflow</option>
+  <option value="hosted_https"{" selected" if use_case == "hosted_https" else ""}>Hosted HTTPS server</option>
+</select>
+<label for="public_url">Public/base URL for this Mimir server</label>
+<input type="text" id="public_url" name="public_url" value="{_escape_attr(public_url)}" placeholder="http://127.0.0.1:8787">
+<label for="ssh_host">SSH host alias (optional)</label>
+<input type="text" id="ssh_host" name="ssh_host" value="{_escape_attr(ssh_host)}" placeholder="my-box">
+<label for="remote_mimir_path">Remote Mimir path (optional)</label>
+<input type="text" id="remote_mimir_path" name="remote_mimir_path" value="{_escape_attr(remote_mimir_path)}" placeholder="/home/user/Projects/mimir">
+<label for="remote_python_path">Remote Python / venv path (optional)</label>
+<input type="text" id="remote_python_path" name="remote_python_path" value="{_escape_attr(remote_python_path)}" placeholder="/home/user/Projects/mimir/.venv/bin/python">
+<label for="cursor_mcp_path">Cursor MCP config path (optional)</label>
+<input type="text" id="cursor_mcp_path" name="cursor_mcp_path" value="{_escape_attr(cursor_mcp_path)}" placeholder="~/.cursor/mcp.json">
+<label for="notes">Setup notes (optional)</label>
+<input type="text" id="notes" name="notes" value="{_escape_attr(notes)}" placeholder="Anything specific about this machine or workflow">
+<div class="panel">
+<strong>Recommended MCP config</strong>
+<p class="muted">This is generated from the connection type and URL above. SSH/headless-style profiles use Bearer auth directly.</p>
+<pre>{snippet}</pre>
+</div>
+<button type="submit">Save Setup And Authorize Cursor</button>
+</form>
+</div></body></html>"""
 
 
 def _setup_required_page() -> str:
@@ -222,15 +402,75 @@ def _setup_required_page() -> str:
 <head><meta charset="utf-8"><title>Mimir — Setup Required</title>
 <style>body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;
 display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
-.card{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:2rem;max-width:480px}
+.card{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:2rem;max-width:560px}
 h1{color:#a78bfa}code{background:#0f1117;padding:.2rem .5rem;border-radius:4px;font-size:.9rem}
+.mode{display:inline-block;margin-bottom:1rem;padding:.25rem .55rem;border-radius:999px;background:#0f172a;border:1px solid #334155;color:#cbd5e1;font-size:.78rem}
+.panel{background:#111827;border:1px solid #374151;border-radius:10px;padding:.9rem 1rem;margin:1rem 0}
+.muted{color:#94a3b8;font-size:.85rem}
 </style></head>
 <body><div class="card">
-<h1>🧠 Mimir — Setup Required</h1>
-<p>No owner account exists yet. Create one with:</p>
+<h1>Mimir Setup Required</h1>
+<div class="mode">Mode: multi_user</div>
+<p>This server is running in multi-user mode and does not allow browser-first owner creation.</p>
+<div class="panel">
+<strong>Server operator action required</strong>
+<p class="muted">Create the first owner account on the server, then come back and sign in here with that API key.</p>
+</div>
 <pre><code>python -m mimir.auth.create_owner --email you@example.com --display-name "Your Name"</code></pre>
-<p>This will print your API key. Then reload this page and authorize.</p>
+<p>For SSH or headless clients, you can also skip browser OAuth and connect Cursor with <code>Authorization: Bearer YOUR_API_KEY</code>.</p>
+<div class="panel">
+<strong>Prefer guided setup?</strong>
+<p class="muted">Open the dashboard connection flow to walk through profile setup and generated MCP config.</p>
+<p><a href="/" style="color:#c4b5fd">Open Mimir Dashboard</a> · <a href="/settings/connection" style="color:#c4b5fd">Open Connection Setup</a></p>
+</div>
 </div></body></html>"""
+
+
+async def _create_owner_account(session: AsyncSession, email: str, display_name: str) -> tuple[User, str]:
+    existing = await session.execute(select(User).where(User.role == "owner").limit(1))
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "An owner account already exists.")
+
+    user = User(
+        id=uuid.uuid4().hex,
+        email=email,
+        display_name=display_name,
+        role="owner",
+    )
+    session.add(user)
+
+    raw_key = secrets.token_urlsafe(32)
+    api_key = APIKey(
+        id=uuid.uuid4().hex,
+        user_id=user.id,
+        key_hash=_hash(raw_key),
+        name="default",
+    )
+    session.add(api_key)
+    await session.commit()
+    return user, raw_key
+
+
+def _connection_summary_html(profile: dict[str, Any], api_key: str) -> str:
+    if not any(profile.values()):
+        return ""
+    snippet = _escape_html(build_mcp_config(profile, api_key=api_key))
+    auth = recommended_auth(profile.get("use_case") or "local_browser")
+    extras = []
+    if profile.get("ssh_host"):
+        extras.append(f"<div><span class='muted'>SSH host:</span> <code>{_escape_html(profile['ssh_host'])}</code></div>")
+    if profile.get("remote_mimir_path"):
+        extras.append(f"<div><span class='muted'>Remote path:</span> <code>{_escape_html(profile['remote_mimir_path'])}</code></div>")
+    if profile.get("cursor_mcp_path"):
+        extras.append(f"<div><span class='muted'>Cursor MCP path:</span> <code>{_escape_html(profile['cursor_mcp_path'])}</code></div>")
+    return (
+        "<div class='panel'>"
+        "<strong>Saved connection profile</strong>"
+        f"<p class='muted'>Use case: <code>{_escape_html(profile.get('use_case') or 'local_browser')}</code> · Recommended auth: <code>{auth}</code></p>"
+        f"{''.join(extras)}"
+        f"<pre><code>{snippet}</code></pre>"
+        "</div>"
+    )
 
 
 # ── Authorize endpoint ─────────────────────────────────────────────────────────
@@ -276,10 +516,21 @@ async def authorize_get(
 ) -> HTMLResponse:
     """Show the OAuth authorization form in the user's browser."""
     _require_oauth(request)
+    settings = get_settings()
 
     # Check if any owner exists (first-run guard)
     result = await session.execute(select(User).where(User.role == "owner").limit(1))
     if not result.scalar_one_or_none():
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "scope": scope,
+        }
+        if settings.is_single_user:
+            return HTMLResponse(_single_user_setup_form(params=params), status_code=200)
         return HTMLResponse(_setup_required_page(), status_code=200)
 
     # Validate params (raise early if obviously wrong)
@@ -310,6 +561,16 @@ async def authorize_post(
     code_challenge: str = Form(""),
     code_challenge_method: str = Form("S256"),
     scope: str = Form(""),
+    setup_action: str = Form(""),
+    email: str = Form(""),
+    display_name: str = Form(""),
+    use_case: str = Form("local_browser"),
+    public_url: str = Form(""),
+    ssh_host: str = Form(""),
+    remote_mimir_path: str = Form(""),
+    cursor_mcp_path: str = Form(""),
+    remote_python_path: str = Form(""),
+    notes: str = Form(""),
     api_key: str = Form(""),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
@@ -328,12 +589,54 @@ async def authorize_post(
         "client_id": client_id, "redirect_uri": redirect_uri, "state": state,
         "code_challenge": code_challenge, "code_challenge_method": code_challenge_method, "scope": scope,
     }
+    settings = get_settings()
+
+    owner_exists = (
+        await session.execute(select(User).where(User.role == "owner").limit(1))
+    ).scalar_one_or_none() is not None
+    if not owner_exists:
+        if settings.is_single_user and setup_action == "create_owner":
+            if not email.strip() or not display_name.strip():
+                return HTMLResponse(
+                    _single_user_setup_form(
+                        error="Email and display name are required.",
+                        email=email,
+                        display_name=display_name,
+                        params=params,
+                    )
+                )
+            try:
+                _, raw_key = await _create_owner_account(session, email.strip(), display_name.strip())
+            except HTTPException as exc:
+                return HTMLResponse(
+                    _single_user_setup_form(
+                        error=str(exc.detail),
+                        email=email,
+                        display_name=display_name,
+                        params=params,
+                    ),
+                    status_code=409,
+                )
+            return HTMLResponse(_owner_created_page(raw_key, params, email.strip(), display_name.strip()))
+
+        if settings.is_single_user:
+            return HTMLResponse(_single_user_setup_form(params=params), status_code=200)
+        return HTMLResponse(_setup_required_page(), status_code=200)
+
+    if setup_action == "save_profile_and_authorize":
+        save_setup_profile({
+            "use_case": use_case,
+            "public_url": public_url,
+            "ssh_host": ssh_host,
+            "remote_mimir_path": remote_mimir_path,
+            "cursor_mcp_path": cursor_mcp_path,
+            "remote_python_path": remote_python_path,
+            "notes": notes,
+        })
 
     # Authenticate user via API key
     if not api_key:
         return HTMLResponse(_authorize_form(error="API key required.", params=params))
-
-    settings = get_settings()
     user = None
 
     # Legacy single-key match
@@ -625,4 +928,7 @@ async def setup_page(session: AsyncSession = Depends(get_session)) -> HTMLRespon
             "<h1>Setup already complete</h1><p>An owner account exists. <a href='/'>Go to Mimir</a></p>",
             status_code=200,
         )
+    settings = get_settings()
+    if settings.is_single_user:
+        return HTMLResponse(_single_user_setup_form(), status_code=200)
     return HTMLResponse(_setup_required_page(), status_code=200)

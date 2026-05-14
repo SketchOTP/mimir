@@ -14,7 +14,7 @@ from mimir.config import get_settings, validate_config
 from mimir.__version__ import __version__
 from mimir.logging import configure_logging, log_event
 from storage.database import init_db, validate_db
-from api.routes import events, memory, skills, reflections, approvals, dashboard, slack, auth, system, telemetry, graph, simulation, mcp_http, oauth, connection
+from api.routes import events, memory, skills, reflections, approvals, dashboard, slack, auth, system, telemetry, graph, simulation, mcp_http, oauth, connection, doctor, projects
 from api.routes.telemetry import providers_router
 
 configure_logging()
@@ -63,12 +63,18 @@ for _router in [auth.router, events.router, memory.router, skills.router, reflec
                 system.metrics_router, telemetry.router, providers_router, graph.router, simulation.router]:
     app.include_router(_router, prefix="/api")
 
+# Projects API (prefix already embedded in router)
+app.include_router(projects.router)
+
 # MCP Streamable HTTP endpoint at /mcp (no /api prefix — remote clients connect directly)
 app.include_router(mcp_http.router)
 
 # OAuth 2.1 + well-known discovery (no prefix — must be at root)
 app.include_router(oauth.router)
 app.include_router(connection.router)
+
+# Doctor endpoint (unauthenticated, prefix embedded in router)
+app.include_router(doctor.router)
 
 # Serve web UI in production (web/dist must exist)
 _web_dist = Path(__file__).parent.parent / "web" / "dist"

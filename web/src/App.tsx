@@ -2,7 +2,7 @@ import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, Brain, Clock, Zap, BookOpen,
   TrendingUp, CheckCircle, RotateCcw,
-  Bell, Settings, BarChart2, FlaskConical,
+  Bell, Settings, BarChart2, FlaskConical, FolderOpen,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -23,9 +23,11 @@ import SimulationPlans from "./pages/SimulationPlans";
 import SimulationPlanDetail from "./pages/SimulationPlanDetail";
 import SimulationCounterfactuals from "./pages/SimulationCounterfactuals";
 import SimulationForecasts from "./pages/SimulationForecasts";
+import { ProjectsPage, ProjectDetailPage } from "./pages/Projects";
 
 const NAV = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/projects", icon: FolderOpen, label: "Projects" },
   { to: "/memories", icon: Brain, label: "Memories" },
   { to: "/timeline", icon: Clock, label: "Timeline" },
   { to: "/skills", icon: Zap, label: "Skills" },
@@ -95,6 +97,8 @@ export default function App() {
           <Route path="/simulation/forecasts" element={<SimulationForecasts />} />
           <Route path="/notifications" element={<NotificationsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/projects/:slug" element={<ProjectDetailPage />} />
         </Routes>
       </main>
     </div>

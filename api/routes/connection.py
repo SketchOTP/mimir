@@ -5,19 +5,25 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import UserContext, get_current_user
 from mimir.config import get_settings
 from mimir.setup_profile import (
     ALLOWED_AUTH_METHODS,
     ALLOWED_USE_CASES,
+    build_mcp_config,
     build_config_variants,
     effective_public_url,
     load_setup_profile,
     normalize_setup_profile,
     profile_warnings,
+    recommended_auth,
     save_setup_profile,
 )
+from storage.database import get_session
+from storage.models import User
 
 router = APIRouter(tags=["connection"])
 
@@ -66,6 +72,51 @@ def _settings_payload(request: Request) -> dict:
             "request_base": request_base,
             "env_public_url": settings.public_url.rstrip("/") if settings.public_url else "",
             "saved_public_url": profile.get("public_url", ""),
+        },
+    }
+
+
+async def _owner_exists(session: AsyncSession) -> bool:
+    result = await session.execute(select(User.id).where(User.role == "owner").limit(1))
+    return result.scalar_one_or_none() is not None
+
+
+@router.get("/api/connection/onboarding")
+async def get_connection_onboarding(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    request_base = _request_base(request)
+    profile = normalize_setup_profile(load_setup_profile())
+    public_base = effective_public_url(request_base)
+    settings = get_settings()
+    return {
+        "auth_mode": settings._effective_auth_mode,
+        "oauth_enabled": settings.oauth_enabled,
+        "owner_exists": await _owner_exists(session),
+        "profile": profile,
+        "recommended_auth": recommended_auth(profile["use_case"]),
+        "warnings": profile_warnings(profile, request_base=request_base),
+        "urls": {
+            "dashboard": f"{public_base}/",
+            "connection_settings": f"{public_base}/settings/connection",
+            "first_run_setup": f"{public_base}/setup",
+            "oauth_authorize": f"{public_base}/oauth/authorize",
+            "mcp_url": f"{public_base}/mcp",
+        },
+        "generated": {
+            "oauth_local": build_mcp_config(
+                profile,
+                request_base=public_base,
+                use_case="local_browser",
+                auth_method="oauth",
+            ),
+            "api_key_remote": build_mcp_config(
+                profile,
+                request_base=public_base,
+                use_case="ssh_remote",
+                auth_method="api_key",
+            ),
         },
     }
 

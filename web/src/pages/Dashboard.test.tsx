@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, beforeEach, afterEach, expect } from "vitest";
 
 import Dashboard from "./Dashboard";
@@ -11,14 +12,38 @@ vi.mock("../lib/api", async () => {
   return {
     ...actual,
     getDashboard: vi.fn(),
+    getConnectionOnboarding: vi.fn(),
+    getProjects: vi.fn().mockResolvedValue({ data: { projects: [], count: 0 } }),
   };
 });
 
 const getDashboardMock = vi.mocked(api.getDashboard);
+const getConnectionOnboardingMock = vi.mocked(api.getConnectionOnboarding);
 
 describe("Dashboard", () => {
   beforeEach(() => {
     getDashboardMock.mockReset();
+    getConnectionOnboardingMock.mockReset();
+    getConnectionOnboardingMock.mockResolvedValue({
+      data: {
+        auth_mode: "single_user",
+        oauth_enabled: true,
+        owner_exists: true,
+        recommended_auth: "oauth",
+        urls: {
+          dashboard: "/",
+          connection_settings: "/settings/connection",
+          first_run_setup: "/setup",
+          oauth_authorize: "/oauth/authorize",
+          mcp_url: "/mcp",
+        },
+        generated: {
+          oauth_local: "{ \"mcpServers\": { \"mimir\": { \"url\": \"http://127.0.0.1:8787/mcp\" } } }",
+          api_key_remote: "{ \"mcpServers\": { \"mimir\": { \"url\": \"http://127.0.0.1:8787/mcp\", \"headers\": { \"Authorization\": \"Bearer YOUR_API_KEY\" } } } }",
+        },
+        warnings: [],
+      },
+    } as any);
   });
 
   afterEach(() => {
@@ -35,9 +60,10 @@ describe("Dashboard", () => {
       },
     } as any);
 
-    render(<Dashboard />);
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getByText("Dashboard")).toBeInTheDocument());
+    expect(screen.getByText("Connect Cursor")).toBeInTheDocument();
     expect(screen.getByText("No lessons recorded yet.")).toBeInTheDocument();
     expect(screen.getByText("No rollbacks recorded.")).toBeInTheDocument();
   });
@@ -45,7 +71,7 @@ describe("Dashboard", () => {
   it("renders with empty API response", async () => {
     getDashboardMock.mockResolvedValue({ data: {} } as any);
 
-    render(<Dashboard />);
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
     await waitFor(() => expect(screen.getAllByText("No lessons recorded yet.")[0]).toBeInTheDocument());
     expect(screen.getAllByText("No rollbacks recorded.")[0]).toBeInTheDocument();
@@ -57,7 +83,7 @@ describe("Dashboard", () => {
       response: { status: 401 },
     });
 
-    render(<Dashboard />);
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
     await waitFor(() => {
       expect(screen.getByText("Dashboard warning")).toBeInTheDocument();

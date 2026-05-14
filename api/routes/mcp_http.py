@@ -1035,6 +1035,18 @@ async def mcp_post(
     """
     api_key = await _resolve_api_key(authorization, x_api_key, request)
 
+    # Record MCP connection event (best-effort, non-blocking)
+    try:
+        from api.routes._mcp_tracker import record_mcp_connection
+        _auth_method = "oauth" if authorization.startswith("Bearer ") and len(authorization) > 50 else "api_key"
+        record_mcp_connection(
+            user_id=None,
+            auth_method=_auth_method,
+            client_name=request.headers.get("X-MCP-Client-Name") or request.headers.get("User-Agent", "")[:64] or None,
+        )
+    except Exception:
+        pass
+
     try:
         body = await request.json()
     except Exception:

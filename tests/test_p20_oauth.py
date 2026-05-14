@@ -153,9 +153,144 @@ class TestOAuthFlow:
         })
         assert r.status_code == 200
         if not has_owner:
-            assert "Setup Required" in r.text or "setup" in r.text.lower()
+            assert "Setup" in r.text or "setup" in r.text.lower()
         else:
             assert "Authorize" in r.text or "authorize" in r.text.lower()
+
+    async def test_single_user_setup_page_explains_flow(self, oauth_client):
+        from mimir.config import get_settings
+        from storage.database import get_session_factory
+        from storage.models import User
+        from sqlalchemy import select
+
+        settings = get_settings()
+        original_mode = settings.auth_mode
+        object.__setattr__(settings, "auth_mode", "single_user")
+        try:
+            factory = get_session_factory()
+            async with factory() as session:
+                has_owner = (
+                    await session.execute(select(User).where(User.role == "owner").limit(1))
+                ).scalar_one_or_none() is not None
+            verifier, challenge = _pkce_pair()
+            reg = await oauth_client.post("/oauth/register", json={
+                "redirect_uris": ["http://localhost:9898/callback"],
+            })
+            client_id = reg.json()["client_id"]
+            r = await oauth_client.get("/oauth/authorize", params={
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": "http://localhost:9898/callback",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "setup-state",
+            })
+            assert r.status_code == 200
+            assert "Mode: single_user" in r.text
+            if has_owner:
+                assert "Authorize Access" in r.text or "authorize" in r.text.lower()
+            else:
+                assert "Create Owner And Continue" in r.text or "create owner" in r.text.lower()
+        finally:
+            object.__setattr__(settings, "auth_mode", original_mode)
+
+    async def test_single_user_setup_can_create_owner_in_browser(self, oauth_client, db_session):
+        from mimir.config import get_settings
+        from mimir.setup_profile import load_setup_profile
+        from storage.models import APIKey, User
+
+        # Clear any existing owners so the setup flow is reachable.
+        result = await db_session.execute(select(User).where(User.role == "owner"))
+        owners = list(result.scalars())
+        for owner in owners:
+            keys = await db_session.execute(select(APIKey).where(APIKey.user_id == owner.id))
+            for key in keys.scalars():
+                await db_session.delete(key)
+            await db_session.delete(owner)
+        await db_session.commit()
+
+        settings = get_settings()
+        original_mode = settings.auth_mode
+        object.__setattr__(settings, "auth_mode", "single_user")
+        try:
+            verifier, challenge = _pkce_pair()
+            reg = await oauth_client.post("/oauth/register", json={
+                "redirect_uris": ["http://localhost:10998/callback"],
+            })
+            client_id = reg.json()["client_id"]
+            r = await oauth_client.post("/oauth/authorize", data={
+                "client_id": client_id,
+                "redirect_uri": "http://localhost:10998/callback",
+                "state": "setup-state",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "scope": "mcp",
+                "setup_action": "create_owner",
+                "email": "owner-browser@test.com",
+                "display_name": "Owner Browser",
+            })
+            assert r.status_code == 200
+            assert "Owner Created" in r.text
+            assert "Save Setup And Authorize Cursor" in r.text
+
+            owner = (
+                await db_session.execute(select(User).where(User.email == "owner-browser@test.com"))
+            ).scalar_one_or_none()
+            assert owner is not None
+            assert owner.role == "owner"
+            profile = load_setup_profile()
+            assert isinstance(profile, dict)
+        finally:
+            object.__setattr__(settings, "auth_mode", original_mode)
+
+    async def test_authorize_can_save_connection_profile_before_redirect(self, oauth_client, db_session):
+        from mimir.setup_profile import load_setup_profile
+
+        owner, raw_key = await _create_test_user(db_session, f"profile-{uuid.uuid4().hex[:8]}@test.com", role="owner")
+        reg = await oauth_client.post("/oauth/register", json={
+            "redirect_uris": ["http://localhost:11998/callback"],
+            "client_name": "Profile Test",
+        })
+        client_id = reg.json()["client_id"]
+        verifier, challenge = _pkce_pair()
+
+        r = await oauth_client.post("/oauth/authorize", data={
+            "client_id": client_id,
+            "redirect_uri": "http://localhost:11998/callback",
+            "state": "profile-state",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "mcp",
+            "api_key": raw_key,
+            "setup_action": "save_profile_and_authorize",
+            "use_case": "ssh_remote",
+            "public_url": "http://192.168.1.50:8787",
+            "ssh_host": "atlas",
+            "remote_mimir_path": "/home/sketch/Projects/mimir",
+            "cursor_mcp_path": "~/.cursor/mcp.json",
+            "remote_python_path": "/home/sketch/Projects/mimir/.venv/bin/python",
+            "notes": "SSH-first setup",
+        }, follow_redirects=False)
+        assert r.status_code == 302
+        assert owner.id
+
+        profile = load_setup_profile()
+        assert profile["use_case"] == "ssh_remote"
+        assert profile["public_url"] == "http://192.168.1.50:8787"
+        assert profile["ssh_host"] == "atlas"
+        assert profile["remote_mimir_path"] == "/home/sketch/Projects/mimir"
+
+    async def test_discovery_uses_saved_public_url_when_env_blank(self, oauth_client):
+        from mimir.setup_profile import save_setup_profile
+
+        save_setup_profile({
+            "use_case": "hosted_https",
+            "public_url": "https://mimir.example.com",
+        })
+        r = await oauth_client.get("/.well-known/oauth-protected-resource")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["resource"] == "https://mimir.example.com"
 
     async def test_full_oauth_flow(self, oauth_client, db_session):
         """Full authorization_code + PKCE flow with a real user."""

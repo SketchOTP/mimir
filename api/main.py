@@ -14,7 +14,7 @@ from mimir.config import get_settings, validate_config
 from mimir.__version__ import __version__
 from mimir.logging import configure_logging, log_event
 from storage.database import init_db, validate_db
-from api.routes import events, memory, skills, reflections, approvals, dashboard, slack, auth, system, telemetry, graph, simulation, mcp_http, oauth
+from api.routes import events, memory, skills, reflections, approvals, dashboard, slack, auth, system, telemetry, graph, simulation, mcp_http, oauth, connection
 from api.routes.telemetry import providers_router
 
 configure_logging()
@@ -68,6 +68,7 @@ app.include_router(mcp_http.router)
 
 # OAuth 2.1 + well-known discovery (no prefix — must be at root)
 app.include_router(oauth.router)
+app.include_router(connection.router)
 
 # Serve web UI in production (web/dist must exist)
 _web_dist = Path(__file__).parent.parent / "web" / "dist"

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy import select
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,12 @@ def _decode_sse(text: str) -> dict:
         if line.startswith("data:"):
             return json.loads(line[5:].strip())
     raise AssertionError(f"No data: line in SSE response: {text!r}")
+
+
+def _tool_payload(resp) -> dict:
+    data = _decode_sse(resp.text)
+    assert "result" in data, data
+    return json.loads(data["result"]["content"][0]["text"])
 
 
 def _mock_prod_settings(api_key: str = "test-secret-key"):
@@ -276,26 +283,33 @@ async def test_mcp_bootstrap_requires_project(client):
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_writes_memories(client):
-    """project_bootstrap stores memories and returns stored list."""
+    """project_bootstrap writes all 7 capsules and returns per-type IDs."""
+    project = "bootstrap_test_writes"
     r = await _post(client, "tools/call", {
         "name": "project_bootstrap",
         "arguments": {
-            "project": "bootstrap_test_writes",
+            "project": project,
             "repo_path": "/test/repo",
             "profile": "Test project: a demo API server. Stack: Python, FastAPI.",
+            "architecture": "Monorepo with api/, web/, worker/, and tests/.",
             "status": "Active. 42 tests passing. No blockers.",
             "constraints": "Never delete production data. Always run tests before committing.",
             "testing": "pytest tests/ -v. Run make test.",
             "knowledge": "Lesson: always pin dependency versions.",
         },
     })
-    data = _decode_sse(r.text)
-    assert "result" in data, data
-    payload = json.loads(data["result"]["content"][0]["text"])
+    payload = _tool_payload(r)
     assert payload["ok"] is True
-    assert payload["total"] >= 4   # at least profile, status, constraints, governance
+    assert payload["total"] == 7
     assert all("id" in m for m in payload["stored"])
     assert payload["run_id"].startswith("bootstrap_")
+    assert payload["project_profile_id"]
+    assert payload["architecture_summary_id"]
+    assert payload["active_status_id"]
+    assert payload["safety_constraint_id"]
+    assert payload["testing_protocol_id"]
+    assert payload["procedural_lesson_id"]
+    assert payload["governance_rules_id"]
 
 
 @pytest.mark.asyncio
@@ -309,32 +323,64 @@ async def test_mcp_bootstrap_idempotency_guard(client):
     }
     # First call — should succeed
     r1 = await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
-    d1 = _decode_sse(r1.text)
-    p1 = json.loads(d1["result"]["content"][0]["text"])
+    p1 = _tool_payload(r1)
     assert p1["ok"] is True
 
     # Second call without force — should be blocked
     r2 = await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
-    d2 = _decode_sse(r2.text)
-    p2 = json.loads(d2["result"]["content"][0]["text"])
+    p2 = _tool_payload(r2)
     assert p2["ok"] is False
     assert p2["existing_count"] > 0
 
 
 @pytest.mark.asyncio
 async def test_mcp_bootstrap_force_overwrites(client):
-    """project_bootstrap with force=true succeeds even when memories exist."""
+    """force=true updates/reindexes without creating extra active capsule rows."""
+    from storage.database import get_session_factory
+    from storage.models import Memory
+
     project = "bootstrap_test_force"
-    args = {"project": project, "profile": "First run."}
+    args = {
+        "project": project,
+        "repo_path": "/test/repo",
+        "profile": "First run.",
+        "architecture": "First architecture.",
+        "status": "First status.",
+        "constraints": "First constraints.",
+        "testing": "First testing protocol.",
+        "knowledge": "First lesson.",
+    }
     await _post(client, "tools/call", {"name": "project_bootstrap", "arguments": args})
 
     r = await _post(client, "tools/call", {
         "name": "project_bootstrap",
-        "arguments": {**args, "profile": "Second run.", "force": True},
+        "arguments": {
+            **args,
+            "profile": "Second run profile.",
+            "architecture": "Second architecture.",
+            "status": "Second status.",
+            "constraints": "Second constraints.",
+            "testing": "Second testing protocol.",
+            "knowledge": "Second lesson.",
+            "force": True,
+        },
     })
-    data = _decode_sse(r.text)
-    payload = json.loads(data["result"]["content"][0]["text"])
+    payload = _tool_payload(r)
     assert payload["ok"] is True
+    assert payload["total"] == 7
+
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(Memory).where(Memory.project == project, Memory.deleted_at.is_(None))
+        )
+        active = [
+            m for m in result.scalars()
+            if isinstance(m.meta, dict) and m.meta.get("bootstrap")
+        ]
+    capsule_types = [m.meta.get("capsule_type") for m in active if isinstance(m.meta, dict)]
+    assert len(active) == 7
+    assert len(set(capsule_types)) == 7
 
 
 @pytest.mark.asyncio
@@ -347,13 +393,143 @@ async def test_mcp_bootstrap_skips_empty_sections(client):
             "profile": "Only profile provided.",
         },
     })
-    data = _decode_sse(r.text)
-    payload = json.loads(data["result"]["content"][0]["text"])
+    payload = _tool_payload(r)
     assert payload["ok"] is True
     types_stored = {m["type"] for m in payload["stored"]}
     assert "project_profile" in types_stored
     assert "testing_protocol" in payload["skipped"]
     assert "procedural_lesson" in payload["skipped"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_metadata_and_search_recall_shape(client):
+    """Bootstrap memories have normalized metadata and search/recall rich fields."""
+    from storage.database import get_session_factory
+    from storage.models import Memory
+
+    project = "auto"
+    repo_path = "/home/sketch/auto"
+    bootstrap_args = {
+        "project": project,
+        "repo_path": repo_path,
+        "profile": "Auto project profile for Linux robotics orchestration.",
+        "architecture": "Service architecture with API, scheduler, and worker.",
+        "status": "Current status: stable and actively maintained.",
+        "constraints": "Safety constraints: no destructive commands without approval.",
+        "testing": "Testing protocol: run pytest tests/ before shipping.",
+        "knowledge": "Procedural lessons: verify migrations before deploy.",
+        "force": True,
+    }
+    payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": bootstrap_args,
+    }))
+    assert payload["ok"] is True
+    assert payload["missing_capsule_types"] == []
+
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(Memory).where(Memory.project == project, Memory.deleted_at.is_(None))
+        )
+        mems = [
+            m for m in result.scalars()
+            if isinstance(m.meta, dict) and m.meta.get("bootstrap")
+        ]
+
+    assert len(mems) == 7
+    for mem in mems:
+        assert mem.project == project
+        assert mem.source_type == "project_bootstrap"
+        assert mem.memory_state == "active"
+        assert mem.verification_status == "trusted_system_observed"
+        assert (mem.trust_score or 0) >= 0.8
+        assert (mem.importance or 0) >= 0.8
+        assert isinstance(mem.meta, dict)
+        assert mem.meta.get("bootstrap") is True
+        assert mem.meta.get("bootstrap_run_id", "").startswith("bootstrap_")
+        assert mem.meta.get("repo_path") == repo_path
+        assert mem.meta.get("project") == project
+        assert mem.meta.get("project_id") == project
+        assert mem.meta.get("capsule_type")
+
+    search_payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": project, "query": "project_profile"},
+    }))
+    assert search_payload["memories"], "Expected bootstrap search results"
+    first = search_payload["memories"][0]
+    for field in (
+        "id", "layer", "content", "score", "importance", "created_at", "project",
+        "project_id", "source_type", "memory_state", "verification_status",
+        "trust_score", "capsule_type", "meta",
+    ):
+        assert field in first
+    assert "PROJECT_PROFILE:" in first["content"] or first.get("capsule_type") == "project_profile"
+
+    recall_payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "what is this project"},
+    }))
+    assert recall_payload["hits"], "Expected bootstrap recall hits"
+    assert any(h.get("capsule_type") == "project_profile" for h in recall_payload["hits"])
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_project_isolation(client):
+    """Wrong project must not return auto bootstrap memories."""
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": "auto",
+            "repo_path": "/home/sketch/auto",
+            "profile": "Auto profile for isolation test.",
+            "architecture": "Auto architecture.",
+            "status": "Auto status.",
+            "constraints": "Auto constraints.",
+            "testing": "Auto testing protocol.",
+            "knowledge": "Auto lessons.",
+            "force": True,
+        },
+    }))
+
+    payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": "wrong_project_slug", "query": "project_profile"},
+    }))
+    assert payload["memories"] == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_capsule_retrieval_queries(client):
+    """Capsule label queries retrieve expected capsule types."""
+    project = "bootstrap_test_capsule_queries"
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": project,
+            "repo_path": "/tmp/repo",
+            "profile": "Profile for capsule query test.",
+            "architecture": "Architecture for capsule query test.",
+            "status": "Status for capsule query test.",
+            "constraints": "Constraints for capsule query test.",
+            "testing": "Testing protocol for capsule query test.",
+            "knowledge": "Knowledge for capsule query test.",
+            "force": True,
+        },
+    }))
+
+    architecture = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": project, "query": "architecture"},
+    }))
+    assert any(m.get("capsule_type") == "architecture_summary" for m in architecture["memories"])
+
+    testing = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "testing protocol"},
+    }))
+    assert any(m.get("capsule_type") == "testing_protocol" for m in testing["hits"])
 
 
 # ── P19-11: dotted legacy aliases are accepted but not advertised ─────────────

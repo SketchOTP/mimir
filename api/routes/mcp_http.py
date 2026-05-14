@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -425,19 +426,21 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 from retrieval.retrieval_engine import search as retrieval_search
 
                 uid = user.id if not user.is_dev else None
+                hits = await retrieval_search(
+                    session, query=args["query"],
+                    project=args.get("project"), user_id=uid,
+                    limit=args.get("limit", 10),
+                    min_score=args.get("min_score", 0.3),
+                )
                 if args.get("token_budget"):
                     ctx = await build_context(
                         session, query=args["query"],
                         project=args.get("project"), session_id=args.get("session_id"),
                         token_budget=args["token_budget"], user_id=uid,
                     )
+                    ctx["hits"] = hits
                     return ctx
-                hits = await retrieval_search(
-                    session, query=args["query"],
-                    project=args.get("project"), user_id=uid,
-                    limit=args.get("limit", 10),
-                )
-                return {"hits": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
+                return {"hits": hits}
 
             case "memory_search":
                 from retrieval.retrieval_engine import search as retrieval_search
@@ -445,10 +448,12 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 uid = user.id if not user.is_dev else None
                 hits = await retrieval_search(
                     session, query=args["query"],
+                    layer=args.get("layer"),
                     project=args.get("project"), user_id=uid,
                     limit=args.get("limit", 20),
+                    min_score=args.get("min_score", 0.3),
                 )
-                return {"memories": [h.model_dump() if hasattr(h, "model_dump") else dict(h) for h in hits]}
+                return {"memories": hits}
 
             case "memory_record_outcome":
                 from memory.memory_extractor import extract_from_event
@@ -554,7 +559,8 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
             case "project_bootstrap":
                 from memory import episodic_store, semantic_store, procedural_store
                 from storage.models import Memory as _Memory
-                from datetime import datetime, UTC
+                from storage.search_backend import get_search_backend
+                from storage import vector_store
 
                 project = args.get("project")
                 if not project:
@@ -565,31 +571,35 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 run_id = datetime.now(UTC).strftime("%m%d%y_%H%M")
                 uid = user.id
 
-                # Idempotency: check for existing bootstrap memories
-                if not force:
-                    existing = await session.execute(
-                        select(_Memory).where(
-                            _Memory.project == project,
-                            _Memory.deleted_at.is_(None),
-                        ).limit(200)
-                    )
-                    boot_count = sum(
-                        1 for m in existing.scalars()
-                        if isinstance(m.meta, dict) and m.meta.get("bootstrap")
-                    )
-                    if boot_count > 0:
-                        return {
-                            "ok": False,
-                            "error": f"{boot_count} bootstrap memories already exist for project '{project}'. Pass force=true to overwrite.",
-                            "existing_count": boot_count,
-                        }
+                def _capsule_type(meta: dict | None) -> str | None:
+                    if not isinstance(meta, dict):
+                        return None
+                    return meta.get("capsule_type") or meta.get("bootstrap_type")
 
-                def _boot_meta(btype: str) -> dict:
+                def _capsule_heading(capsule_type: str) -> str:
+                    return capsule_type.upper()
+
+                def _label_content(capsule_type: str, body: str) -> str:
+                    heading = _capsule_heading(capsule_type)
+                    normalized = body.strip()
+                    if normalized.startswith(f"{heading}:"):
+                        return normalized
+                    return (
+                        f"{heading}: {project}\n"
+                        f"CAPSULE_TYPE: {capsule_type}\n"
+                        f"PROJECT: {project}\n\n"
+                        f"{normalized}"
+                    )
+
+                def _boot_meta(capsule_type: str) -> dict:
                     return {
                         "bootstrap": True,
-                        "bootstrap_type": btype,
+                        "capsule_type": capsule_type,
+                        "bootstrap_type": capsule_type,  # backward compat
                         "bootstrap_run_id": f"bootstrap_{run_id}",
-                        "source_repo": repo_path,
+                        "repo_path": repo_path,
+                        "project": project,
+                        "project_id": project,
                     }
 
                 # Governance rules are always generated server-side
@@ -620,12 +630,61 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     ("_governance",  _GOVERNANCE,              "semantic",   0.90, "governance_rules"),
                 ]
 
+                existing_rows = await session.execute(
+                    select(_Memory).where(
+                        _Memory.project == project,
+                        _Memory.deleted_at.is_(None),
+                    ).limit(400)
+                )
+                bootstrap_existing = [
+                    m for m in existing_rows.scalars()
+                    if isinstance(m.meta, dict) and m.meta.get("bootstrap")
+                ]
+                if bootstrap_existing and not force:
+                    existing_types = sorted({
+                        t for t in (_capsule_type(m.meta) for m in bootstrap_existing) if t
+                    })
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"{len(bootstrap_existing)} bootstrap memories already exist for project "
+                            f"'{project}'. Pass force=true to overwrite/reindex."
+                        ),
+                        "existing_count": len(bootstrap_existing),
+                        "existing_capsule_types": existing_types,
+                    }
+
+                by_type: dict[str, list[Any]] = {}
+                for mem in bootstrap_existing:
+                    t = _capsule_type(mem.meta)
+                    if not t:
+                        continue
+                    by_type.setdefault(t, []).append(mem)
+
+                # If duplicates exist for one capsule type, keep the newest active row and
+                # archive the rest so force=true acts as a repair path.
+                for capsule_type, rows in by_type.items():
+                    if len(rows) <= 1:
+                        continue
+                    rows.sort(key=lambda m: (m.created_at or datetime.min), reverse=True)
+                    keeper = rows[0]
+                    for dup in rows[1:]:
+                        dup.memory_state = "archived"
+                        dup.deleted_at = datetime.now(UTC)
+                        dup.valid_to = datetime.now(UTC)
+                        dup.superseded_by = keeper.id
+                        vector_store.delete(dup.layer, dup.id)
+                        session.add(dup)
+                    by_type[capsule_type] = [keeper]
+                await session.commit()
+
                 stored = []
                 skipped = []
+                expected_types_for_run: set[str] = set()
                 _trust_kwargs = dict(
-                    source_type="system_observed",
+                    source_type="project_bootstrap",
                     verification_status="trusted_system_observed",
-                    trust_score=0.80,
+                    trust_score=0.85,
                     confidence=0.85,
                     created_by=uid,
                 )
@@ -634,34 +693,155 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     if not content:
                         skipped.append(btype)
                         continue
+                    expected_types_for_run.add(btype)
+                    content = _label_content(btype, content)
                     meta = _boot_meta(btype)
-                    if layer == "episodic":
-                        mem = await episodic_store.store(
-                            session, content, project=project,
-                            user_id=uid, importance=importance, meta=meta,
-                            **_trust_kwargs,
-                        )
-                    elif layer == "semantic":
-                        mem = await semantic_store.store(
-                            session, content, project=project,
-                            user_id=uid, importance=importance, meta=meta,
-                            **_trust_kwargs,
-                        )
+                    existing = (by_type.get(btype) or [None])[0]
+                    if existing and force:
+                        existing.project = project
+                        existing.meta = meta
+                        existing.source_type = _trust_kwargs["source_type"]
+                        existing.memory_state = "active"
+                        existing.verification_status = _trust_kwargs["verification_status"]
+                        existing.trust_score = max(existing.trust_score or 0.0, _trust_kwargs["trust_score"])
+                        existing.importance = max(existing.importance or 0.0, importance)
+                        existing.deleted_at = None
+                        existing.valid_to = None
+                        existing.superseded_by = None
+                        session.add(existing)
+                        await session.commit()
+                        if layer == "procedural":
+                            mem = await procedural_store.update(session, existing.id, content)
+                        elif layer == "semantic":
+                            mem = await semantic_store.update_content(session, existing.id, content)
+                        else:
+                            mem = await episodic_store.update_content(session, existing.id, content)
+                        if not mem:
+                            raise ValueError(f"Failed to update bootstrap memory for {btype}")
                     else:
-                        mem = await procedural_store.store(
-                            session, content, project=project,
-                            importance=importance, meta=meta,
-                            **_trust_kwargs,
+                        if layer == "episodic":
+                            mem = await episodic_store.store(
+                                session, content, project=project,
+                                user_id=uid, importance=importance, meta=meta,
+                                **_trust_kwargs,
+                            )
+                        elif layer == "semantic":
+                            mem = await semantic_store.store(
+                                session, content, project=project,
+                                user_id=uid, importance=importance, meta=meta,
+                                **_trust_kwargs,
+                            )
+                        else:
+                            mem = await procedural_store.store(
+                                session, content, project=project,
+                                importance=importance, meta=meta,
+                                **_trust_kwargs,
+                            )
+                    stored.append({
+                        "id": mem.id,
+                        "layer": mem.layer,
+                        "type": btype,
+                        "project": mem.project,
+                    })
+
+                # Force mode acts as repair/reindex: rebuild keyword index and ensure vectors exist.
+                reindexed_rows = 0
+                if force:
+                    backend = get_search_backend()
+                    reindexed_rows = await backend.reindex(session)
+                    for item in stored:
+                        mem = await session.get(_Memory, item["id"])
+                        if mem is None:
+                            continue
+                        upsert_kwargs = dict(
+                            user_id=mem.user_id,
+                            project_id=mem.project,
+                            importance=mem.importance,
+                            trust_score=mem.trust_score,
+                            verification_status=mem.verification_status,
+                            memory_state=mem.memory_state,
                         )
-                    stored.append({"id": mem.id, "layer": mem.layer, "type": btype})
+                        if mem.created_at:
+                            upsert_kwargs["created_at"] = mem.created_at.isoformat()
+                        if mem.layer == "episodic":
+                            upsert_kwargs["metadata"] = {"session_id": mem.session_id or ""}
+                        vector_store.upsert(mem.layer, mem.id, mem.content, **upsert_kwargs)
+
+                # Read-after-write verification
+                from retrieval.retrieval_engine import search as retrieval_search
+
+                def _has_capsule(hits: list[dict[str, Any]], capsule_type: str) -> bool:
+                    for hit in hits:
+                        meta = hit.get("meta") or {}
+                        t = hit.get("capsule_type")
+                        if not t and isinstance(meta, dict):
+                            t = meta.get("capsule_type") or meta.get("bootstrap_type")
+                        if t == capsule_type:
+                            return True
+                    return False
+
+                verify_checks = [
+                    ("project_profile", "project_profile"),
+                    ("architecture_summary", "architecture_summary"),
+                    ("testing_protocol", "testing_protocol"),
+                ]
+                verification: dict[str, bool] = {}
+                missing_capsules: list[str] = []
+                for query, expected in verify_checks:
+                    if expected not in expected_types_for_run:
+                        continue
+                    hits = await retrieval_search(
+                        session,
+                        query=query,
+                        project=project,
+                        user_id=uid if not user.is_dev else None,
+                        limit=10,
+                        min_score=0.0,
+                    )
+                    ok = _has_capsule(hits, expected)
+                    verification[f"search:{query}"] = ok
+                    if not ok:
+                        missing_capsules.append(expected)
+
+                recall_hits = await retrieval_search(
+                    session,
+                    query="what is this project",
+                    project=project,
+                    user_id=uid if not user.is_dev else None,
+                    limit=10,
+                    min_score=0.0,
+                ) if "project_profile" in expected_types_for_run else []
+                if "project_profile" in expected_types_for_run:
+                    recall_ok = _has_capsule(recall_hits, "project_profile")
+                    verification["recall:what is this project"] = recall_ok
+                    if not recall_ok and "project_profile" not in missing_capsules:
+                        missing_capsules.append("project_profile")
+
+                stored_by_type = {item["type"]: item["id"] for item in stored}
+                missing_storage = [t for t in sorted(expected_types_for_run) if t not in stored_by_type]
+                ok = not missing_capsules and not missing_storage
 
                 return {
-                    "ok": True,
+                    "ok": ok,
+                    "warning": (
+                        f"Bootstrap verification failed; missing capsule retrieval for: {sorted(set(missing_capsules))}"
+                        if not ok else None
+                    ),
                     "project": project,
                     "run_id": f"bootstrap_{run_id}",
                     "stored": stored,
                     "skipped": skipped,
                     "total": len(stored),
+                    "project_profile_id": stored_by_type.get("project_profile"),
+                    "architecture_summary_id": stored_by_type.get("architecture_summary"),
+                    "active_status_id": stored_by_type.get("active_status"),
+                    "safety_constraint_id": stored_by_type.get("safety_constraint"),
+                    "testing_protocol_id": stored_by_type.get("testing_protocol"),
+                    "procedural_lesson_id": stored_by_type.get("procedural_lesson"),
+                    "governance_rules_id": stored_by_type.get("governance_rules"),
+                    "verification": verification,
+                    "missing_capsule_types": sorted(set(missing_capsules + missing_storage)),
+                    "reindexed_rows": reindexed_rows,
                 }
 
             case _:

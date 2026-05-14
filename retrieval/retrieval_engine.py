@@ -11,6 +11,12 @@ from memory import memory_retriever
 from storage.models import RetrievalLog
 
 
+def _capsule_type(meta: dict[str, Any] | None) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    return meta.get("capsule_type") or meta.get("bootstrap_type")
+
+
 async def search(
     session: AsyncSession,
     query: str,
@@ -54,6 +60,14 @@ async def search(
             "score": h["score"],
             "importance": h["memory"].importance,
             "created_at": h["memory"].created_at.isoformat() if h["memory"].created_at else None,
+            "project": h["memory"].project,
+            "project_id": h["memory"].project,
+            "source_type": h["memory"].source_type,
+            "memory_state": h["memory"].memory_state,
+            "verification_status": h["memory"].verification_status,
+            "trust_score": h["memory"].trust_score,
+            "meta": h["memory"].meta or {},
+            "capsule_type": _capsule_type(h["memory"].meta),
         }
         for h in hits
     ]

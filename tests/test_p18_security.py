@@ -6,7 +6,7 @@ Covers:
   - API key hash-only storage (no plaintext keys in DB)
   - Cross-user memory access blocked
   - Approval ownership enforced
-  - Version set to 0.1.0-rc1
+  - Version wiring uses canonical project version source
   - Tailscale forbidden command scan
   - Config validation in prod mode rejects insecure defaults
   - Security scan script exists
@@ -19,11 +19,17 @@ import os
 import uuid
 
 import pytest
+from mimir.__version__ import __version__
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _uid(prefix: str = "p18") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def _canonical_version() -> str:
+    """Return canonical package version for assertions."""
+    return __version__
 
 
 # ── 1. Quarantine reactivation blocked ────────────────────────────────────────
@@ -329,17 +335,17 @@ async def test_approval_decision_requires_ownership(app):
 
 # ── 6. Version check ──────────────────────────────────────────────────────────
 
-def test_version_set_to_rc1():
-    """Version must be 0.1.0-rc1 in all version sources."""
-    from mimir.__version__ import __version__
-    assert __version__ == "0.1.0-rc1", f"Expected 0.1.0-rc1, got {__version__}"
+def test_version_constant_matches_canonical_version():
+    """__version__ must match the canonical package version."""
+    assert __version__ == _canonical_version(), (
+        f"__version__ '{__version__}' must match canonical version '{_canonical_version()}'"
+    )
 
 
 def test_version_in_pyproject():
     """pyproject.toml version must match __version__.py."""
     import tomllib
     from pathlib import Path
-    from mimir.__version__ import __version__
 
     pyproject = Path("pyproject.toml")
     if not pyproject.exists():
@@ -361,7 +367,7 @@ async def test_health_endpoint_returns_version(client):
     assert r.status_code == 200
     data = r.json()
     assert "version" in data, "Health endpoint must include version"
-    assert data["version"] == "0.1.0-rc1"
+    assert data["version"] == _canonical_version()
 
 
 # ── 7. Tailscale forbidden command scan ──────────────────────────────────────

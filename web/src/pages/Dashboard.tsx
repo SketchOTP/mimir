@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { getConnectionOnboarding, getDashboard, getProjects } from "../lib/api";
 import StatCard from "../components/StatCard";
 import PageHeader from "../components/PageHeader";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Copy, Check, Laptop, Terminal, Wifi } from "lucide-react";
 
 interface DashData {
   memory_count: number;
@@ -43,18 +43,53 @@ interface ConnectionOnboardingData {
   warnings: { code: string; message: string; severity: string }[];
 }
 
+type ConnectionTab = "local" | "ssh";
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button
+      onClick={copy}
+      className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-100 transition-colors"
+    >
+      {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+function McpConfigBlock({ label, json, icon: Icon }: { label: string; json: string; icon: React.ElementType }) {
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Icon size={14} className="text-slate-400" />
+          <span className="text-xs font-medium text-slate-300">{label}</span>
+        </div>
+        <CopyButton text={json} />
+      </div>
+      <pre className="text-xs text-slate-400 overflow-x-auto leading-relaxed">{json}</pre>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState<DashData | null>(null);
   const [onboarding, setOnboarding] = useState<ConnectionOnboardingData | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>("");
-  const [onboardingError, setOnboardingError] = useState<string>("");
+  const [tab, setTab] = useState<ConnectionTab>("local");
 
   const load = async () => {
     setLoading(true);
     setError("");
-    setOnboardingError("");
     try {
       const [dashboardResponse, onboardingResponse] = await Promise.all([
         getDashboard(),
@@ -62,7 +97,6 @@ export default function Dashboard() {
       ]);
       setData(dashboardResponse.data);
       setOnboarding(onboardingResponse.data);
-      // Projects load best-effort (auth may fail for unauthenticated state)
       try {
         const projResp = await getProjects();
         setProjects(projResp.data?.projects ?? []);
@@ -71,11 +105,8 @@ export default function Dashboard() {
       }
     } catch (err: any) {
       const detail = err?.response?.status === 401
-        ? "Authentication failed while loading the dashboard."
-        : "Dashboard data was unavailable or returned an unexpected shape.";
-      const onboardingDetail = err?.response?.status === 401
-        ? "Connection onboarding is unavailable until dashboard authentication succeeds."
-        : "Connection onboarding data could not be loaded.";
+        ? "Authentication required — check your API key."
+        : "Could not reach the Mimir API. Is it running?";
       setData({
         memory_count: 0,
         skill_count: 0,
@@ -86,7 +117,6 @@ export default function Dashboard() {
         recent_lessons: [],
       });
       setError(detail);
-      setOnboardingError(onboardingDetail);
       setOnboarding(null);
     } finally {
       setLoading(false);
@@ -103,7 +133,7 @@ export default function Dashboard() {
     <div>
       <PageHeader
         title="Dashboard"
-        subtitle="System-wide learning state"
+        subtitle="System-wide memory &amp; learning state"
         action={
           <button onClick={load} className="flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-100 transition-colors">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
@@ -112,104 +142,113 @@ export default function Dashboard() {
         }
       />
       <div className="p-6 space-y-6">
-        {/* First-run setup prompt — shown when Mimir is running but has no owner yet */}
+
+        {/* First-run banner — only when no owner exists */}
         {!loading && onboarding && !onboarding.owner_exists && (
           <div className="rounded-lg border border-brand-600/50 bg-brand-950/30 px-5 py-4">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
-                <h2 className="text-base font-semibold text-slate-100">Mimir is running — finish setup</h2>
+                <h2 className="text-base font-semibold text-slate-100">Finish setup to connect Cursor</h2>
                 <p className="mt-1 text-sm text-slate-400">
-                  No owner account exists yet. Create one to generate your API key and connect Cursor.
+                  No owner account yet. Create one to get your API key — takes 30 seconds.
                 </p>
               </div>
-              <div className="flex gap-3">
-                <a
-                  href={onboarding.urls.first_run_setup}
-                  className="inline-flex items-center rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-500"
-                >
-                  Create owner &amp; get API key →
-                </a>
-                <a
-                  href={onboarding.urls.connection_settings}
-                  className="inline-flex items-center rounded-md border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:border-slate-400"
-                >
-                  Connection settings
-                </a>
-              </div>
-            </div>
-            <div className="mt-3 text-xs text-slate-500">
-              Running in <span className="text-slate-300">{onboarding.auth_mode}</span> mode ·
-              MCP: <span className="text-slate-300">{onboarding.urls.mcp_url}</span>
+              <a
+                href={onboarding.urls.first_run_setup}
+                className="inline-flex items-center rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-500 whitespace-nowrap"
+              >
+                Create owner &amp; get API key →
+              </a>
             </div>
           </div>
         )}
 
         {error && (
-          <div className="rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
-            <strong className="block text-amber-100">Dashboard warning</strong>
+          <div className="rounded-lg border border-red-700/50 bg-red-950/30 px-4 py-3 text-sm text-red-200">
             {error}
           </div>
         )}
-        {loading && (
-          <div className="rounded-lg border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-400">
-            Loading dashboard…
+
+        {/* Connect Cursor panel */}
+        {!loading && onboarding && onboarding.owner_exists && (
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-100">Connect Cursor</h2>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  Pick your setup type, copy the config, and paste into your{" "}
+                  <code className="text-slate-300">~/.cursor/mcp.json</code>.
+                </p>
+              </div>
+              <a
+                href={onboarding.urls.connection_settings}
+                className="text-xs text-brand-400 hover:text-brand-300"
+              >
+                Advanced settings →
+              </a>
+            </div>
+
+            {/* Tab selector */}
+            <div className="flex gap-1 mb-4 bg-slate-950 rounded-lg p-1 w-fit">
+              <button
+                onClick={() => setTab("local")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  tab === "local"
+                    ? "bg-slate-700 text-slate-100"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Laptop size={12} />
+                Local
+              </button>
+              <button
+                onClick={() => setTab("ssh")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  tab === "ssh"
+                    ? "bg-slate-700 text-slate-100"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Terminal size={12} />
+                SSH / Remote
+              </button>
+            </div>
+
+            {tab === "local" && onboarding.generated.oauth_local && (
+              <McpConfigBlock
+                label="Local — Cursor running on the same machine as Mimir"
+                json={onboarding.generated.oauth_local}
+                icon={Laptop}
+              />
+            )}
+            {tab === "ssh" && onboarding.generated.api_key_remote && (
+              <McpConfigBlock
+                label="SSH / Remote — Cursor on your laptop, Mimir on a server"
+                json={onboarding.generated.api_key_remote}
+                icon={Terminal}
+              />
+            )}
+
+            {onboarding.warnings.length > 0 && (
+              <div className="mt-3 rounded-md border border-amber-700/40 bg-amber-950/20 p-3 text-xs text-amber-300">
+                {onboarding.warnings[0]?.message}
+              </div>
+            )}
           </div>
         )}
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-100">Connect Cursor</h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Setup now starts here: check auth mode, open guided setup, and copy the MCP config that matches this server.
-              </p>
-            </div>
-            <span className="rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-300">
-              Mode: {onboarding?.auth_mode ?? "unknown"}
-            </span>
+
+        {/* Show a simpler card while loading or when onboarding unavailable */}
+        {!loading && !onboarding && (
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
+            <h2 className="text-sm font-semibold text-slate-100 mb-1">Connect Cursor</h2>
+            <p className="text-xs text-slate-500">
+              Could not load connection info.{" "}
+              <a href="/settings/connection" className="text-brand-400 hover:underline">Open connection settings</a>
+              {" "}or check the API is running.
+            </p>
           </div>
-          {onboardingError && (
-            <p className="mt-3 text-sm text-amber-300">{onboardingError}</p>
-          )}
-          {onboarding && (
-            <>
-              <div className="mt-4 flex flex-wrap gap-3">
-                <a
-                  href={onboarding.urls.connection_settings}
-                  className="inline-flex items-center rounded-md bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-500"
-                >
-                  Open Guided Connection Setup
-                </a>
-                <a
-                  href={onboarding.urls.first_run_setup}
-                  className="inline-flex items-center rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:border-slate-500 hover:text-white"
-                >
-                  Open First-Run Setup
-                </a>
-                <a
-                  href={onboarding.urls.dashboard}
-                  className="inline-flex items-center rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:border-slate-500 hover:text-white"
-                >
-                  Open Dashboard Home
-                </a>
-              </div>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Local OAuth MCP JSON</p>
-                  <pre className="mt-2 overflow-x-auto text-xs text-slate-300">{onboarding.generated.oauth_local}</pre>
-                </div>
-                <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                  <p className="text-xs font-medium uppercase tracking-wide text-slate-400">SSH/Remote MCP JSON</p>
-                  <pre className="mt-2 overflow-x-auto text-xs text-slate-300">{onboarding.generated.api_key_remote}</pre>
-                </div>
-              </div>
-              {onboarding.warnings.length > 0 && (
-                <div className="mt-3 rounded-md border border-amber-700/40 bg-amber-950/20 p-3 text-sm text-amber-200">
-                  {onboarding.warnings[0]?.message}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        )}
+
         {/* Project memory profiles */}
         <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
           <div className="flex items-center justify-between mb-3">
@@ -218,7 +257,7 @@ export default function Dashboard() {
           </div>
           {projects.length === 0 ? (
             <p className="text-sm text-slate-500">
-              No projects bootstrapped yet.{" "}
+              No projects yet.{" "}
               <span className="text-slate-400">
                 From Cursor: <code className="text-brand-400">project_bootstrap(project=&quot;myproject&quot;)</code>
               </span>
@@ -276,7 +315,6 @@ export default function Dashboard() {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
-          {/* Recent lessons */}
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
             <h2 className="text-sm font-medium text-slate-300 mb-3">Recent Lessons Learned</h2>
             {lessons.length > 0 ? (
@@ -293,7 +331,6 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Recent rollbacks */}
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
             <h2 className="text-sm font-medium text-slate-300 mb-3">Recent Rollbacks</h2>
             {rollbacks.length > 0 ? (

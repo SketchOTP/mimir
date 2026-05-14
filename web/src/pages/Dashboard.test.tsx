@@ -86,8 +86,7 @@ describe("Dashboard", () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
     await waitFor(() => {
-      expect(screen.getByText("Dashboard warning")).toBeInTheDocument();
+      expect(screen.getByText("Authentication required — check your API key.")).toBeInTheDocument();
     });
-    expect(screen.getByText("Authentication failed while loading the dashboard.")).toBeInTheDocument();
   });
 });

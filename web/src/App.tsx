@@ -1,8 +1,7 @@
 import { Routes, Route, NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Brain, Clock, Zap, BookOpen,
-  TrendingUp, CheckCircle, RotateCcw,
-  Bell, Settings, BarChart2, FlaskConical, FolderOpen,
+  LayoutDashboard, Brain, Zap,
+  CheckCircle, Bell, Settings, FolderOpen,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -29,14 +28,8 @@ const NAV = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/projects", icon: FolderOpen, label: "Projects" },
   { to: "/memories", icon: Brain, label: "Memories" },
-  { to: "/timeline", icon: Clock, label: "Timeline" },
   { to: "/skills", icon: Zap, label: "Skills" },
-  { to: "/reflections", icon: BookOpen, label: "Reflections" },
-  { to: "/improvements", icon: TrendingUp, label: "Improvements" },
   { to: "/approvals", icon: CheckCircle, label: "Approvals" },
-  { to: "/rollbacks", icon: RotateCcw, label: "Rollbacks" },
-  { to: "/telemetry", icon: BarChart2, label: "Telemetry" },
-  { to: "/simulation", icon: FlaskConical, label: "Simulation" },
   { to: "/notifications", icon: Bell, label: "Notifications" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ];

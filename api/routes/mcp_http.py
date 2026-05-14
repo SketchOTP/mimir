@@ -159,6 +159,59 @@ _TOOLS = [
             ],
         },
     },
+    {
+        "name": "project.bootstrap",
+        "description": (
+            "Ingest a curated project capsule into Mimir for an existing repo. "
+            "The caller reads the repo files and passes content as named sections; "
+            "Mimir stores them as typed, trust-scored memories scoped to the project. "
+            "Idempotent — aborts if bootstrap memories already exist unless force=true. "
+            "Safe: never stores secrets or raw source trees — caller is responsible for "
+            "passing only curated content (docs, status, governance files)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Project name used to scope all written memories.",
+                },
+                "repo_path": {
+                    "type": "string",
+                    "description": "Source repo path — stored as metadata only, never read by the server.",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Overwrite existing bootstrap memories for this project (default false).",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Project identity: README, project_goal, pyproject.toml (combined).",
+                },
+                "architecture": {
+                    "type": "string",
+                    "description": "Repo structure: repo_map, project_knowledge, top-level docs/.",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Current state: project_status (capped), history tail, memory index.",
+                },
+                "constraints": {
+                    "type": "string",
+                    "description": "Safety + governance: AGENTS.md, CLAUDE.md, .cursor/rules/ (combined).",
+                },
+                "testing": {
+                    "type": "string",
+                    "description": "Test protocol: commands, suites, isolation rules extracted from governance docs.",
+                },
+                "knowledge": {
+                    "type": "string",
+                    "description": "Lessons learned: project_knowledge, recent history tail.",
+                },
+            },
+            "required": ["project"],
+        },
+    },
 ]
 
 _TOOL_NAMES = {t["name"] for t in _TOOLS}
@@ -481,6 +534,119 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                     user_id=user.id if not user.is_dev else None,
                 )
                 return {"id": imp.id, "title": imp.title, "status": imp.status}
+
+            case "project.bootstrap":
+                from memory import episodic_store, semantic_store, procedural_store
+                from storage.models import Memory as _Memory
+                from datetime import datetime, UTC
+
+                project = args.get("project")
+                if not project:
+                    raise ValueError("project is required")
+
+                repo_path = args.get("repo_path", "")
+                force = bool(args.get("force", False))
+                run_id = datetime.now(UTC).strftime("%m%d%y_%H%M")
+                uid = user.id
+
+                # Idempotency: check for existing bootstrap memories
+                if not force:
+                    existing = await session.execute(
+                        select(_Memory).where(
+                            _Memory.project == project,
+                            _Memory.deleted_at.is_(None),
+                        ).limit(200)
+                    )
+                    boot_count = sum(
+                        1 for m in existing.scalars()
+                        if isinstance(m.meta, dict) and m.meta.get("bootstrap")
+                    )
+                    if boot_count > 0:
+                        return {
+                            "ok": False,
+                            "error": f"{boot_count} bootstrap memories already exist for project '{project}'. Pass force=true to overwrite.",
+                            "existing_count": boot_count,
+                        }
+
+                def _boot_meta(btype: str) -> dict:
+                    return {
+                        "bootstrap": True,
+                        "bootstrap_type": btype,
+                        "bootstrap_run_id": f"bootstrap_{run_id}",
+                        "source_repo": repo_path,
+                    }
+
+                # Governance rules are always generated server-side
+                _GOVERNANCE = (
+                    f"GOVERNANCE PRIORITY ORDER: {project}\n\n"
+                    "Priority (highest to lowest):\n"
+                    "1. .cursor/rules/*.md / *.mdc\n"
+                    "2. AGENTS.md\n"
+                    "3. CLAUDE.md\n"
+                    "4. project_status.md / project_goal.md (repo truth)\n"
+                    "5. Mimir recalled memories (supplemental, not authoritative)\n\n"
+                    "MIMIR USAGE RULES:\n"
+                    "- memory.recall: supplemental context and lessons only\n"
+                    "- memory.remember: log outcomes, bugs, lessons at session end\n"
+                    "- Do not store full source files, secrets, or raw logs\n"
+                    "- Bootstrap memories (bootstrap=true in meta) are reference points\n"
+                    "- Rerun project.bootstrap with force=true after major project changes"
+                )
+
+                # Section → (layer, importance, bootstrap_type)
+                _SECTIONS = [
+                    ("profile",      args.get("profile"),      "semantic",   0.95, "project_profile"),
+                    ("architecture", args.get("architecture"), "semantic",   0.90, "architecture_summary"),
+                    ("status",       args.get("status"),       "episodic",   0.85, "active_status"),
+                    ("constraints",  args.get("constraints"),  "semantic",   0.95, "safety_constraint"),
+                    ("testing",      args.get("testing"),      "procedural", 0.85, "testing_protocol"),
+                    ("knowledge",    args.get("knowledge"),    "procedural", 0.80, "procedural_lesson"),
+                    ("_governance",  _GOVERNANCE,              "semantic",   0.90, "governance_rules"),
+                ]
+
+                stored = []
+                skipped = []
+                _trust_kwargs = dict(
+                    source_type="system_observed",
+                    verification_status="trusted_system_observed",
+                    trust_score=0.80,
+                    confidence=0.85,
+                    created_by=uid,
+                )
+
+                for _key, content, layer, importance, btype in _SECTIONS:
+                    if not content:
+                        skipped.append(btype)
+                        continue
+                    meta = _boot_meta(btype)
+                    if layer == "episodic":
+                        mem = await episodic_store.store(
+                            session, content, project=project,
+                            user_id=uid, importance=importance, meta=meta,
+                            **_trust_kwargs,
+                        )
+                    elif layer == "semantic":
+                        mem = await semantic_store.store(
+                            session, content, project=project,
+                            user_id=uid, importance=importance, meta=meta,
+                            **_trust_kwargs,
+                        )
+                    else:
+                        mem = await procedural_store.store(
+                            session, content, project=project,
+                            importance=importance, meta=meta,
+                            **_trust_kwargs,
+                        )
+                    stored.append({"id": mem.id, "layer": mem.layer, "type": btype})
+
+                return {
+                    "ok": True,
+                    "project": project,
+                    "run_id": f"bootstrap_{run_id}",
+                    "stored": stored,
+                    "skipped": skipped,
+                    "total": len(stored),
+                }
 
             case _:
                 raise ValueError(f"Unknown tool: {name}")

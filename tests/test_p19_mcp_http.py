@@ -241,3 +241,107 @@ async def test_mcp_cross_user_isolation(client, app):
         assert not any("user A's secret" in h.get("content", "") for h in hits)
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+# ── project.bootstrap tests ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_listed_in_tools(client):
+    """tools/list includes project.bootstrap."""
+    r = await _post(client, "tools/list")
+    data = _decode_sse(r.text)
+    names = {t["name"] for t in data["result"]["tools"]}
+    assert "project.bootstrap" in names
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_requires_project(client):
+    """project.bootstrap returns an error when project is missing."""
+    r = await _post(client, "tools/call", {
+        "name": "project.bootstrap",
+        "arguments": {"profile": "some content"},
+    })
+    data = _decode_sse(r.text)
+    assert "error" in data, data
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_writes_memories(client):
+    """project.bootstrap stores memories and returns stored list."""
+    r = await _post(client, "tools/call", {
+        "name": "project.bootstrap",
+        "arguments": {
+            "project": "bootstrap_test_writes",
+            "repo_path": "/test/repo",
+            "profile": "Test project: a demo API server. Stack: Python, FastAPI.",
+            "status": "Active. 42 tests passing. No blockers.",
+            "constraints": "Never delete production data. Always run tests before committing.",
+            "testing": "pytest tests/ -v. Run make test.",
+            "knowledge": "Lesson: always pin dependency versions.",
+        },
+    })
+    data = _decode_sse(r.text)
+    assert "result" in data, data
+    payload = json.loads(data["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["total"] >= 4   # at least profile, status, constraints, governance
+    assert all("id" in m for m in payload["stored"])
+    assert payload["run_id"].startswith("bootstrap_")
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_idempotency_guard(client):
+    """Second bootstrap call without force returns ok=False and existing_count."""
+    project = "bootstrap_test_idempotent"
+    args = {
+        "project": project,
+        "profile": "Demo project.",
+        "constraints": "Never break prod.",
+    }
+    # First call — should succeed
+    r1 = await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+    d1 = _decode_sse(r1.text)
+    p1 = json.loads(d1["result"]["content"][0]["text"])
+    assert p1["ok"] is True
+
+    # Second call without force — should be blocked
+    r2 = await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+    d2 = _decode_sse(r2.text)
+    p2 = json.loads(d2["result"]["content"][0]["text"])
+    assert p2["ok"] is False
+    assert p2["existing_count"] > 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_force_overwrites(client):
+    """project.bootstrap with force=true succeeds even when memories exist."""
+    project = "bootstrap_test_force"
+    args = {"project": project, "profile": "First run."}
+    await _post(client, "tools/call", {"name": "project.bootstrap", "arguments": args})
+
+    r = await _post(client, "tools/call", {
+        "name": "project.bootstrap",
+        "arguments": {**args, "profile": "Second run.", "force": True},
+    })
+    data = _decode_sse(r.text)
+    payload = json.loads(data["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_skips_empty_sections(client):
+    """Sections not provided are listed in skipped, not stored."""
+    r = await _post(client, "tools/call", {
+        "name": "project.bootstrap",
+        "arguments": {
+            "project": "bootstrap_test_skip",
+            "profile": "Only profile provided.",
+        },
+    })
+    data = _decode_sse(r.text)
+    payload = json.loads(data["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    types_stored = {m["type"] for m in payload["stored"]}
+    assert "project_profile" in types_stored
+    assert "testing_protocol" in payload["skipped"]
+    assert "procedural_lesson" in payload["skipped"]

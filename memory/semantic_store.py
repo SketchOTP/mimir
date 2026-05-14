@@ -221,6 +221,8 @@ async def store(
         trust_score=t_score,
         verification_status=v_status,
         memory_state=state,
+        source_type=source_type,
+        metadata=meta,
     )
 
     if conflict_with:
@@ -295,6 +297,8 @@ async def update_content(session: AsyncSession, memory_id: str, content: str) ->
         trust_score=mem.trust_score or 0.7,
         verification_status=mem.verification_status or TrustLevel.TRUSTED_SYSTEM_OBSERVED,
         memory_state=mem.memory_state or MemoryState.ACTIVE,
+        source_type=mem.source_type,
+        metadata=mem.meta,
     )
     return mem
 

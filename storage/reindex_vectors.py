@@ -47,6 +47,8 @@ async def reindex() -> int:
                 trust_score=mem.trust_score if mem.trust_score is not None else 0.7,
                 verification_status=mem.verification_status or "trusted_system_observed",
                 memory_state=mem.memory_state or "active",
+                source_type=mem.source_type,
+                metadata=mem.meta,
             )
             total += 1
             if total % 100 == 0:

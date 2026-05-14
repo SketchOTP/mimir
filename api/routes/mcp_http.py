@@ -232,6 +232,67 @@ _DOTTED_ALIASES: dict[str, str] = {
 }
 
 
+async def _run_memory_recall_tool(
+    session,
+    *,
+    query: str,
+    project: str | None,
+    session_id: str | None,
+    user_id: str | None,
+    limit: int,
+    min_score: float,
+    token_budget: int | None,
+) -> dict[str, Any]:
+    from context.context_builder import build as build_context
+    from retrieval.retrieval_engine import search as retrieval_search
+
+    hits = await retrieval_search(
+        session,
+        query=query,
+        project=project,
+        session_id=session_id,
+        user_id=user_id,
+        limit=limit,
+        min_score=min_score,
+    )
+    if token_budget:
+        ctx = await build_context(
+            session,
+            query=query,
+            project=project,
+            session_id=session_id,
+            token_budget=token_budget,
+            user_id=user_id,
+        )
+        ctx["hits"] = hits
+        return ctx
+    return {"hits": hits}
+
+
+async def _run_memory_search_tool(
+    session,
+    *,
+    query: str,
+    layer: str | None,
+    project: str | None,
+    user_id: str | None,
+    limit: int,
+    min_score: float,
+) -> dict[str, Any]:
+    from retrieval.retrieval_engine import search as retrieval_search
+
+    hits = await retrieval_search(
+        session,
+        query=query,
+        layer=layer,
+        project=project,
+        user_id=user_id,
+        limit=limit,
+        min_score=min_score,
+    )
+    return {"memories": hits}
+
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 def _www_authenticate_header(request: Request | None = None) -> str:
@@ -422,38 +483,29 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 return {"ok": True, "stored": stored}
 
             case "memory_recall":
-                from context.context_builder import build as build_context
-                from retrieval.retrieval_engine import search as retrieval_search
-
                 uid = user.id if not user.is_dev else None
-                hits = await retrieval_search(
-                    session, query=args["query"],
-                    project=args.get("project"), user_id=uid,
+                return await _run_memory_recall_tool(
+                    session,
+                    query=args["query"],
+                    project=args.get("project"),
+                    session_id=args.get("session_id"),
+                    user_id=uid,
                     limit=args.get("limit", 10),
                     min_score=args.get("min_score", 0.3),
+                    token_budget=args.get("token_budget"),
                 )
-                if args.get("token_budget"):
-                    ctx = await build_context(
-                        session, query=args["query"],
-                        project=args.get("project"), session_id=args.get("session_id"),
-                        token_budget=args["token_budget"], user_id=uid,
-                    )
-                    ctx["hits"] = hits
-                    return ctx
-                return {"hits": hits}
 
             case "memory_search":
-                from retrieval.retrieval_engine import search as retrieval_search
-
                 uid = user.id if not user.is_dev else None
-                hits = await retrieval_search(
-                    session, query=args["query"],
+                return await _run_memory_search_tool(
+                    session,
+                    query=args["query"],
                     layer=args.get("layer"),
-                    project=args.get("project"), user_id=uid,
+                    project=args.get("project"),
+                    user_id=uid,
                     limit=args.get("limit", 20),
                     min_score=args.get("min_score", 0.3),
                 )
-                return {"memories": hits}
 
             case "memory_record_outcome":
                 from memory.memory_extractor import extract_from_event
@@ -729,6 +781,8 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                             mem = await semantic_store.store(
                                 session, content, project=project,
                                 user_id=uid, importance=importance, meta=meta,
+                                check_duplicates=False,
+                                detect_conflicts=False,
                                 **_trust_kwargs,
                             )
                         else:
@@ -760,16 +814,16 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                             trust_score=mem.trust_score,
                             verification_status=mem.verification_status,
                             memory_state=mem.memory_state,
+                            source_type=mem.source_type,
+                            metadata=mem.meta,
                         )
                         if mem.created_at:
                             upsert_kwargs["created_at"] = mem.created_at.isoformat()
                         if mem.layer == "episodic":
-                            upsert_kwargs["metadata"] = {"session_id": mem.session_id or ""}
+                            upsert_kwargs["metadata"] = {**(mem.meta or {}), "session_id": mem.session_id or ""}
                         vector_store.upsert(mem.layer, mem.id, mem.content, **upsert_kwargs)
 
                 # Read-after-write verification
-                from retrieval.retrieval_engine import search as retrieval_search
-
                 def _has_capsule(hits: list[dict[str, Any]], capsule_type: str) -> bool:
                     for hit in hits:
                         meta = hit.get("meta") or {}
@@ -790,27 +844,32 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 for query, expected in verify_checks:
                     if expected not in expected_types_for_run:
                         continue
-                    hits = await retrieval_search(
+                    hits = (await _run_memory_search_tool(
                         session,
                         query=query,
+                        layer=None,
                         project=project,
                         user_id=uid if not user.is_dev else None,
                         limit=10,
                         min_score=0.0,
-                    )
+                    ))["memories"]
                     ok = _has_capsule(hits, expected)
                     verification[f"search:{query}"] = ok
                     if not ok:
                         missing_capsules.append(expected)
 
-                recall_hits = await retrieval_search(
-                    session,
-                    query="what is this project",
-                    project=project,
-                    user_id=uid if not user.is_dev else None,
-                    limit=10,
-                    min_score=0.0,
-                ) if "project_profile" in expected_types_for_run else []
+                recall_hits = (
+                    await _run_memory_recall_tool(
+                        session,
+                        query="what is this project",
+                        project=project,
+                        session_id=None,
+                        user_id=uid if not user.is_dev else None,
+                        limit=10,
+                        min_score=0.0,
+                        token_budget=None,
+                    )
+                )["hits"] if "project_profile" in expected_types_for_run else []
                 if "project_profile" in expected_types_for_run:
                     recall_ok = _has_capsule(recall_hits, "project_profile")
                     verification["recall:what is this project"] = recall_ok

@@ -71,6 +71,7 @@ def _build_metadata(
     trust_score: float = 0.7,
     verification_status: str = "trusted_system_observed",
     memory_state: str = "active",
+    source_type: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a fully-populated metadata dict for isolation and trust filtering."""
@@ -78,12 +79,14 @@ def _build_metadata(
         "memory_id": memory_id,
         "layer": layer,
         "user_id": user_id or "",
+        "project": project_id or "",
         "project_id": project_id or "",
         "importance": importance,
         "created_at": created_at or datetime.now(UTC).isoformat(),
         "trust_score": trust_score,
         "verification_status": verification_status,
         "memory_state": memory_state,
+        "source_type": source_type or "",
     }
     if extra:
         for k, v in extra.items():
@@ -104,6 +107,7 @@ def upsert(
     trust_score: float = 0.7,
     verification_status: str = "trusted_system_observed",
     memory_state: str = "active",
+    source_type: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Upsert a vector with full isolation and trust metadata."""
@@ -118,6 +122,7 @@ def upsert(
         trust_score=trust_score,
         verification_status=verification_status,
         memory_state=memory_state,
+        source_type=source_type,
         extra=metadata,
     )
     col.upsert(ids=[memory_id], embeddings=vectors, documents=[content], metadatas=[meta])

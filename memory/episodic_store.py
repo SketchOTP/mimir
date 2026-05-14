@@ -97,7 +97,8 @@ async def store(
         trust_score=t_score,
         verification_status=v_status,
         memory_state=state,
-        metadata={"session_id": session_id or ""},
+        source_type=source_type,
+        metadata={**(meta or {}), "session_id": session_id or ""},
     )
     return mem
 
@@ -173,6 +174,7 @@ async def update_content(session: AsyncSession, memory_id: str, content: str) ->
         trust_score=mem.trust_score or 0.7,
         verification_status=mem.verification_status or TrustLevel.TRUSTED_SYSTEM_OBSERVED,
         memory_state=mem.memory_state or MemoryState.ACTIVE,
-        metadata={"session_id": mem.session_id or ""},
+        source_type=mem.source_type,
+        metadata={**(mem.meta or {}), "session_id": mem.session_id or ""},
     )
     return mem

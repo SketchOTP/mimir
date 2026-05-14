@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from retrieval.providers import (
     ProviderHit,
+    bootstrap_capsule_provider,
     episodic_recent_provider,
     high_trust_provider,
     identity_provider,
@@ -181,6 +182,9 @@ async def orchestrate(
 
     # ── 1. Run all providers sequentially (AsyncSession limitation) ────────────
     provider_coros: dict = {
+        "bootstrap_capsule": bootstrap_capsule_provider(
+            session, query, project=project, user_id=user_id, limit=7,
+        ),
         "vector": vector_provider(
             session, query, project=project, user_id=user_id,
             limit=limits["vector"],

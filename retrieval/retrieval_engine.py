@@ -10,20 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from memory import memory_retriever
 from memory.trust import MemoryState
+from retrieval.bootstrap_capsules import (
+    capsule_query_score,
+    capsule_type,
+    load_bootstrap_capsules,
+)
 from retrieval.providers import keyword_provider
 from storage.models import Memory, RetrievalLog
 
 _BLOCKED = list(MemoryState.BLOCKED)
-
-
-def _capsule_type(meta: dict[str, Any] | None) -> str | None:
-    if not isinstance(meta, dict):
-        return None
-    return meta.get("capsule_type") or meta.get("bootstrap_type")
-
-
-def _norm_query(query: str) -> str:
-    return " ".join(query.lower().replace("_", " ").strip().split())
 
 
 def _query_variants(query: str) -> list[str]:
@@ -32,7 +27,7 @@ def _query_variants(query: str) -> list[str]:
     if raw:
         variants.append(raw)
 
-    normalized = _norm_query(query)
+    normalized = " ".join(query.lower().replace("_", " ").strip().split())
     if normalized and normalized not in variants:
         variants.append(normalized)
 
@@ -41,60 +36,6 @@ def _query_variants(query: str) -> list[str]:
         variants.append(underscored)
 
     return variants
-
-
-def _capsule_boost(meta: dict[str, Any] | None, query: str) -> float:
-    if not isinstance(meta, dict) or not meta.get("bootstrap"):
-        return 0.0
-
-    capsule = _capsule_type(meta)
-    if not capsule:
-        return 0.0
-
-    q = _norm_query(query)
-    boost = 0.04
-
-    # Exact capsule label queries should always win.
-    if capsule in query.lower() or capsule.replace("_", " ") in q:
-        boost += 0.70
-
-    is_identity = any(
-        phrase in q
-        for phrase in (
-            "what is this project",
-            "what is the project",
-            "about this project",
-            "project overview",
-            "project context",
-        )
-    )
-    if is_identity:
-        boost += {
-            "project_profile": 0.70,
-            "architecture_summary": 0.48,
-            "active_status": 0.42,
-            "safety_constraint": 0.34,
-            "testing_protocol": 0.34,
-            "governance_rules": 0.34,
-            "procedural_lesson": 0.22,
-        }.get(capsule, 0.0)
-
-    if any(term in q for term in ("test", "testing", "validation", "verify", "protocol")):
-        if capsule == "testing_protocol":
-            boost += 0.78
-
-    if "procedural lesson" in q or ("procedural" in q and "lesson" in q):
-        if capsule == "procedural_lesson":
-            boost += 0.78
-
-    if any(term in q for term in ("safety", "constraint", "governance", "rule", "policy")):
-        if capsule == "safety_constraint":
-            boost += 0.72
-        if capsule == "governance_rules":
-            boost += 0.68
-
-    return boost
-
 
 async def search(
     session: AsyncSession,
@@ -112,6 +53,20 @@ async def search(
     variants = _query_variants(query)
 
     candidates: dict[str, dict[str, Any]] = {}
+
+    bootstrap_hits = await load_bootstrap_capsules(
+        session,
+        project=project,
+        query=query,
+        user_id=user_id,
+        limit=n,
+    )
+    for mem in bootstrap_hits:
+        candidates[mem.id] = {
+            "memory": mem,
+            "layer": mem.layer,
+            "score": capsule_query_score(mem.meta if isinstance(mem.meta, dict) else None, query),
+        }
 
     # 1) Vector retrieval across all variants.
     for variant in variants:
@@ -181,7 +136,10 @@ async def search(
     reranked: list[dict[str, Any]] = []
     for entry in candidates.values():
         mem = entry["memory"]
-        boosted = float(entry["score"]) + _capsule_boost(mem.meta if isinstance(mem.meta, dict) else None, query)
+        boosted = max(
+            float(entry["score"]),
+            capsule_query_score(mem.meta if isinstance(mem.meta, dict) else None, query),
+        )
         reranked.append({"memory": mem, "layer": entry["layer"], "score": boosted})
 
     reranked.sort(key=lambda h: h["score"], reverse=True)
@@ -214,7 +172,7 @@ async def search(
             "verification_status": h["memory"].verification_status,
             "trust_score": h["memory"].trust_score,
             "meta": h["memory"].meta or {},
-            "capsule_type": _capsule_type(h["memory"].meta),
+            "capsule_type": capsule_type(h["memory"].meta),
         }
         for h in hits
     ]

@@ -13,6 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from memory.trust import MemoryState
+from retrieval.bootstrap_capsules import capsule_query_score, load_bootstrap_capsules
 from storage import vector_store
 from storage.models import Memory
 
@@ -167,6 +168,36 @@ async def keyword_provider(
             reason="keyword_like_fallback",
         )
         for mem, score in scored[:limit]
+    ]
+
+
+async def bootstrap_capsule_provider(
+    session: AsyncSession,
+    query: str,
+    *,
+    project: str | None = None,
+    user_id: str | None = None,
+    limit: int = 20,
+) -> list[ProviderHit]:
+    """Direct SQL fallback for project bootstrap capsules."""
+    mems = await load_bootstrap_capsules(
+        session,
+        project=project,
+        query=query,
+        user_id=user_id,
+        limit=limit,
+    )
+    return [
+        ProviderHit(
+            memory_id=mem.id,
+            score=capsule_query_score(mem.meta if isinstance(mem.meta, dict) else None, query),
+            retrieval_source="bootstrap_capsule",
+            trust_score=mem.trust_score or 0.5,
+            memory_state=mem.memory_state or MemoryState.ACTIVE,
+            created_at=mem.created_at,
+            reason=f"bootstrap_sql:{(mem.meta or {}).get('capsule_type', '')}",
+        )
+        for mem in mems
     ]
 
 

@@ -143,7 +143,9 @@ class PostgresSearchBackend(SearchBackend):
         if not query.strip():
             return []
 
-        params: dict = {"q": query, "lim": limit}
+        normalized = " ".join(query.replace("_", " ").strip().split())
+        label = normalized.lower().replace(" ", "_")
+        params: dict = {"q": normalized or query, "raw": query, "norm": normalized or query, "label": label, "lim": limit}
         uid_clause = ""
         if user_id is not None:
             uid_clause = "AND (user_id = :uid OR user_id IS NULL)"
@@ -157,11 +159,24 @@ class PostgresSearchBackend(SearchBackend):
         # Use tsvector index if available; fall back to plainto_tsquery over content
         sql = f"""
             SELECT id AS memory_id,
-                   ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', :q)) AS score
+                   GREATEST(
+                       ts_rank_cd(to_tsvector('english', content), plainto_tsquery('english', :q)),
+                       CASE
+                           WHEN LOWER(content) LIKE '%' || LOWER(:raw) || '%' THEN 0.99
+                           WHEN LOWER(REPLACE(content, '_', ' ')) LIKE '%' || LOWER(:norm) || '%' THEN 0.97
+                           WHEN LOWER(COALESCE(meta->>'capsule_type', meta->>'bootstrap_type', '')) = :label THEN 1.0
+                           ELSE 0.0
+                       END
+                   ) AS score
             FROM memories
             WHERE deleted_at IS NULL
               AND memory_state != 'quarantined'
-              AND to_tsvector('english', content) @@ plainto_tsquery('english', :q)
+              AND (
+                    to_tsvector('english', content) @@ plainto_tsquery('english', :q)
+                    OR LOWER(content) LIKE '%' || LOWER(:raw) || '%'
+                    OR LOWER(REPLACE(content, '_', ' ')) LIKE '%' || LOWER(:norm) || '%'
+                    OR LOWER(COALESCE(meta->>'capsule_type', meta->>'bootstrap_type', '')) = :label
+                  )
               {uid_clause}
               {proj_clause}
             ORDER BY score DESC

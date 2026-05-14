@@ -508,15 +508,15 @@ async def _call_tool(name: str, args: dict, api_key: str) -> Any:
                 return {"approval": {"id": approval.id, "title": approval.title, "status": approval.status}}
 
             case "approval_status":
-                from storage.models import Approval
+                from storage.models import ApprovalRequest
 
-                q = select(Approval)
+                q = select(ApprovalRequest)
                 if not user.is_dev:
-                    q = q.where(Approval.user_id == user.id)
+                    q = q.where(ApprovalRequest.user_id == user.id)
                 status_filter = args.get("status", "pending")
                 if status_filter and status_filter != "all":
-                    q = q.where(Approval.status == status_filter)
-                q = q.order_by(Approval.created_at.desc()).limit(50)
+                    q = q.where(ApprovalRequest.status == status_filter)
+                q = q.order_by(ApprovalRequest.created_at.desc()).limit(50)
                 result = await session.execute(q)
                 approvals = result.scalars().all()
                 return {"approvals": [

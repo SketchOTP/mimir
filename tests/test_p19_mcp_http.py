@@ -532,6 +532,130 @@ async def test_mcp_bootstrap_capsule_retrieval_queries(client):
     assert any(m.get("capsule_type") == "testing_protocol" for m in testing["hits"])
 
 
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_search_returns_testing_protocol_variants(client):
+    """memory_search returns testing_protocol for underscore and spaced queries."""
+    project = "bootstrap_test_testing_queries"
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": project,
+            "repo_path": "/tmp/repo",
+            "profile": "Profile capsule.",
+            "architecture": "Architecture capsule.",
+            "status": "Status capsule.",
+            "constraints": "Safety constraints capsule.",
+            "testing": "Testing protocol: run pytest tests/ and validate migrations.",
+            "knowledge": "Procedural lesson capsule.",
+            "force": True,
+        },
+    }))
+
+    q1 = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": project, "query": "testing_protocol"},
+    }))
+    assert any(m.get("capsule_type") == "testing_protocol" for m in q1["memories"])
+
+    q2 = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": project, "query": "testing protocol"},
+    }))
+    assert any(m.get("capsule_type") == "testing_protocol" for m in q2["memories"])
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_search_returns_procedural_lesson_variant(client):
+    """memory_search returns procedural_lesson for underscore query."""
+    project = "bootstrap_test_procedural_query"
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": project,
+            "repo_path": "/tmp/repo",
+            "profile": "Profile capsule.",
+            "architecture": "Architecture capsule.",
+            "status": "Status capsule.",
+            "constraints": "Safety constraints capsule.",
+            "testing": "Testing protocol capsule.",
+            "knowledge": "Procedural lesson: verify rollbacks before deploy.",
+            "force": True,
+        },
+    }))
+
+    payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_search",
+        "arguments": {"project": project, "query": "procedural_lesson"},
+    }))
+    assert any(m.get("capsule_type") == "procedural_lesson" for m in payload["memories"])
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_recall_identity_testing_and_safety_queries(client):
+    """memory_recall prioritizes project bootstrap capsules by intent."""
+    project = "auto"
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": project,
+            "repo_path": "/home/sketch/auto",
+            "profile": "Auto profile: autonomous robotics stack.",
+            "architecture": "Auto architecture: API, worker, scheduler.",
+            "status": "Auto status: stable and active.",
+            "constraints": "Safety constraints: no destructive commands, strict governance.",
+            "testing": "Testing protocol: run pytest tests/ before shipping.",
+            "knowledge": "Procedural lesson: verify migrations and backups first.",
+            "force": True,
+        },
+    }))
+
+    project_recall = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "what is this project?"},
+    }))
+    assert any(h.get("capsule_type") == "project_profile" for h in project_recall["hits"])
+
+    testing_recall = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "what tests should I run?"},
+    }))
+    assert any(h.get("capsule_type") == "testing_protocol" for h in testing_recall["hits"])
+
+    safety_recall = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": project, "query": "what are the safety constraints?"},
+    }))
+    assert any(
+        h.get("capsule_type") in {"safety_constraint", "governance_rules"}
+        for h in safety_recall["hits"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_bootstrap_wrong_project_recall_isolated(client):
+    """Wrong project slug does not return auto bootstrap capsules on recall."""
+    _tool_payload(await _post(client, "tools/call", {
+        "name": "project_bootstrap",
+        "arguments": {
+            "project": "auto",
+            "repo_path": "/home/sketch/auto",
+            "profile": "Auto profile for wrong-project recall isolation test.",
+            "architecture": "Auto architecture for wrong-project recall isolation test.",
+            "status": "Auto status for wrong-project recall isolation test.",
+            "constraints": "Auto constraints for wrong-project recall isolation test.",
+            "testing": "Auto testing protocol for wrong-project recall isolation test.",
+            "knowledge": "Auto lessons for wrong-project recall isolation test.",
+            "force": True,
+        },
+    }))
+
+    payload = _tool_payload(await _post(client, "tools/call", {
+        "name": "memory_recall",
+        "arguments": {"project": "wrong_project_slug", "query": "what is this project?"},
+    }))
+    assert payload["hits"] == []
+
+
 # ── P19-11: dotted legacy aliases are accepted but not advertised ─────────────
 
 @pytest.mark.asyncio

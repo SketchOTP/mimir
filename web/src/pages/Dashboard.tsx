@@ -20,12 +20,28 @@ interface DashData {
 export default function Dashboard() {
   const [data, setData] = useState<DashData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>("");
 
   const load = async () => {
     setLoading(true);
+    setError("");
     try {
       const r = await getDashboard();
       setData(r.data);
+    } catch (err: any) {
+      const detail = err?.response?.status === 401
+        ? "Authentication failed while loading the dashboard."
+        : "Dashboard data was unavailable or returned an unexpected shape.";
+      setData({
+        memory_count: 0,
+        skill_count: 0,
+        pending_approvals: 0,
+        rollback_events: 0,
+        improvements_promoted: 0,
+        recent_rollbacks: [],
+        recent_lessons: [],
+      });
+      setError(detail);
     } finally {
       setLoading(false);
     }
@@ -34,6 +50,8 @@ export default function Dashboard() {
   useEffect(() => { load(); }, []);
 
   const pct = (v?: number) => v !== undefined ? `${(v * 100).toFixed(1)}%` : "—";
+  const lessons = data?.recent_lessons ?? [];
+  const rollbacks = data?.recent_rollbacks ?? [];
 
   return (
     <div>
@@ -48,6 +66,17 @@ export default function Dashboard() {
         }
       />
       <div className="p-6 space-y-6">
+        {error && (
+          <div className="rounded-lg border border-amber-700/50 bg-amber-950/30 px-4 py-3 text-sm text-amber-200">
+            <strong className="block text-amber-100">Dashboard warning</strong>
+            {error}
+          </div>
+        )}
+        {loading && (
+          <div className="rounded-lg border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-400">
+            Loading dashboard…
+          </div>
+        )}
         {/* Stats grid */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard label="Memories" value={data?.memory_count ?? "—"} />
@@ -77,9 +106,9 @@ export default function Dashboard() {
           {/* Recent lessons */}
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
             <h2 className="text-sm font-medium text-slate-300 mb-3">Recent Lessons Learned</h2>
-            {data?.recent_lessons.length ? (
+            {lessons.length > 0 ? (
               <ul className="space-y-2">
-                {data.recent_lessons.map((l, i) => (
+                {lessons.map((l, i) => (
                   <li key={i} className="text-sm text-slate-400 flex gap-2">
                     <span className="text-brand-500 mt-0.5">▸</span>
                     <span>{l}</span>
@@ -94,9 +123,9 @@ export default function Dashboard() {
           {/* Recent rollbacks */}
           <div className="bg-slate-900 border border-slate-800 rounded-lg p-4">
             <h2 className="text-sm font-medium text-slate-300 mb-3">Recent Rollbacks</h2>
-            {data?.recent_rollbacks.length ? (
+            {rollbacks.length > 0 ? (
               <ul className="space-y-2">
-                {data.recent_rollbacks.map((r) => (
+                {rollbacks.map((r) => (
                   <li key={r.id} className="text-sm">
                     <span className="text-red-400">⊘</span>
                     <span className="text-slate-300 ml-2">{r.target_id}</span>
